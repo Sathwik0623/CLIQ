@@ -1,0 +1,153 @@
+# Curated procedural recipes (Phase 9 — Bug 3).
+#
+# These are HUMAN-VERIFIED, ordered command templates for common setup tasks.
+# When a "how do I set up ..." question matches a recipe here, CLIQ returns the
+# curated steps verbatim instead of assembling commands from raw KB keyword
+# matches (which produced noise like `ipv6 route static bfd`).
+#
+# Resolution order (see server._resolve_recipe):
+#   1. A curated recipe whose `match` keywords are all present in the question.
+#   2. Fallback: KB-assembled sequence, clearly labelled as UNVERIFIED.
+#
+# Placeholders use <angle-brackets>; the engineer fills them in at the prompt.
+# CLIQ never runs these — they are advisory, insert-for-review only.
+
+recipes:
+  - id: static-route-ipv4
+    title: Configure an IPv4 static route
+    platform: ios
+    # ALL of these tokens must appear in the question for this recipe to match.
+    match:
+      keywords: ["static", "route"]
+      # ANY of these phrases also triggers it (token order independent).
+      phrases: ["static route", "ip route", "floating static"]
+    steps:
+      - command: configure terminal
+        mode: exec
+        kind: config
+        description: Enter global configuration mode.
+      - command: ip route <dest-network> <mask> <next-hop-or-interface>
+        mode: config
+        kind: config
+        description: >-
+          Add the static route. Replace <dest-network> and <mask> with the
+          destination prefix, and <next-hop-or-interface> with the next-hop IP
+          or the exit interface.
+      - command: end
+        mode: config
+        kind: config
+        description: Return to privileged EXEC mode.
+    verify:
+      - command: show ip route static
+        mode: exec
+        kind: verify
+        description: Confirm the static route is installed in the routing table.
+
+  - id: static-route-ipv6
+    title: Configure an IPv6 static route
+    platform: ios
+    match:
+      keywords: ["ipv6", "static", "route"]
+      phrases: ["ipv6 static route", "ipv6 route"]
+    steps:
+      - command: configure terminal
+        mode: exec
+        kind: config
+        description: Enter global configuration mode.
+      - command: ipv6 route <dest-prefix>/<len> <next-hop-or-interface>
+        mode: config
+        kind: config
+        description: >-
+          Add the IPv6 static route. Replace <dest-prefix>/<len> with the
+          destination prefix and length, and <next-hop-or-interface> with the
+          next-hop address or exit interface.
+      - command: end
+        mode: config
+        kind: config
+        description: Return to privileged EXEC mode.
+    verify:
+      - command: show ipv6 route static
+        mode: exec
+        kind: verify
+        description: Confirm the IPv6 static route is installed.
+
+  - id: default-route-ipv4
+    title: Configure a default route (gateway of last resort)
+    platform: ios
+    match:
+      keywords: ["default", "route"]
+      phrases: ["default route", "gateway of last resort"]
+    steps:
+      - command: configure terminal
+        mode: exec
+        kind: config
+        description: Enter global configuration mode.
+      - command: ip route 0.0.0.0 0.0.0.0 <next-hop-or-interface>
+        mode: config
+        kind: config
+        description: >-
+          Add the default route. Replace <next-hop-or-interface> with the
+          upstream next-hop IP or the exit interface.
+      - command: end
+        mode: config
+        kind: config
+        description: Return to privileged EXEC mode.
+    verify:
+      - command: show ip route 0.0.0.0
+        mode: exec
+        kind: verify
+        description: Confirm the default route (gateway of last resort) is set.
+
+  - id: ospf-setup
+    title: Configure OSPF (process, network, and interface type)
+    platform: ios
+    match:
+      keywords: ["ospf"]
+      phrases: ["ospf", "configure ospf", "set up ospf", "enable ospf",
+                "ospf network", "router ospf", "ospf area"]
+    # Mode-context audited: each interface/router-level command is preceded by
+    # its mode-entry command, so no line produces "% Invalid input" when the
+    # block is entered in order. The engineer fills <placeholders> and presses
+    # Enter per line — CLIQ never runs these.
+    steps:
+      - command: configure terminal
+        mode: exec
+        kind: config
+        description: Enter global configuration mode.
+      - command: router ospf <process-id>
+        mode: config
+        kind: config
+        description: >-
+          Enter OSPF router configuration mode. Replace <process-id> with a
+          locally significant OSPF process ID (1-65535).
+      - command: network <network> <wildcard-mask> area <area-id>
+        mode: config-router
+        kind: config
+        description: >-
+          Advertise the interface(s) into OSPF. Replace <network> and
+          <wildcard-mask> (e.g. 10.0.0.0 0.0.0.255) and <area-id> (e.g. 0).
+      - command: exit
+        mode: config-router
+        kind: config
+        description: Leave router-config mode, back to global configuration mode.
+      - command: interface <interface-name>
+        mode: config
+        kind: config
+        description: >-
+          Enter interface configuration mode. Replace <interface-name> with the
+          interface (e.g. GigabitEthernet0/0).
+      - command: ip ospf network <broadcast|point-to-point|non-broadcast|point-to-multipoint>
+        mode: config-if
+        kind: config
+        description: >-
+          Set the OSPF network type on this interface. Choose one of
+          broadcast, point-to-point, non-broadcast, or point-to-multipoint.
+      - command: end
+        mode: config-if
+        kind: config
+        description: Return to privileged EXEC mode.
+    verify:
+      - command: show ip ospf neighbor
+        mode: exec
+        kind: verify
+        description: Confirm OSPF adjacencies formed on the configured interface.

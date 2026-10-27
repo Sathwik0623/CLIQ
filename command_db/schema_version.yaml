@@ -1,0 +1,4 @@
+schema_version: "1.0.0"
+target_platform: "iosv"
+target_os_version: "15.9(3)M9"   # confirmed from your show version harvest
+description: "CLIQ Command Database - Phase 1 (IOS exec + config)"

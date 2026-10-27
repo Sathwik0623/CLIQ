@@ -1,0 +1,18 @@
+commands:
+  - id: "traceroute"
+    full_command: "traceroute"
+    tokens: ["traceroute"]
+    abbreviations: ["tr", "trace"]
+    mode: "exec"
+    description: "Traces the route packets take to a destination"
+    risk_class: "informational"
+    is_destructive: false
+    arguments:
+      - name: "destination"
+        type: "hostname_or_ip"
+        required: true
+        position: 1
+    examples:
+      - "traceroute 8.8.8.8"
+      - "traceroute google.com"
+    related_commands: ["ping"]

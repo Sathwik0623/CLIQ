@@ -1,0 +1,106 @@
+commands:
+  - id: "copy_run_start"
+    full_command: "copy running-config startup-config"
+    tokens: ["copy", "running-config", "startup-config"]
+    abbreviations: ["copy run start", "wr"]
+    mode: "enable"
+    description: "Saves the running configuration to startup-config (NVRAM)"
+    risk_class: "configuration"
+    is_destructive: false
+    arguments: []
+    examples:
+      - "copy running-config startup-config"
+    related_commands: ["write memory", "show startup-config"]
+
+  - id: "write_memory"
+    full_command: "write memory"
+    tokens: ["write", "memory"]
+    abbreviations: ["wr mem", "write mem"]
+    mode: "enable"
+    description: "Saves the running configuration (legacy alias of 'copy running-config startup-config')"
+    risk_class: "configuration"
+    is_destructive: false
+    arguments: []
+    examples:
+      - "write memory"
+    related_commands: ["copy running-config startup-config"]
+
+  - id: "reload"
+    full_command: "reload"
+    tokens: ["reload"]
+    abbreviations: []
+    mode: "enable"
+    description: "Reboots the device"
+    risk_class: "catastrophic"
+    is_destructive: true
+    arguments: []
+    examples:
+      - "reload"
+    related_commands: ["copy running-config startup-config"]
+
+  - id: "erase_startup_config"
+    full_command: "erase startup-config"
+    tokens: ["erase", "startup-config"]
+    abbreviations: ["erase start"]
+    mode: "enable"
+    description: "Erases the saved startup configuration in NVRAM"
+    risk_class: "catastrophic"
+    is_destructive: true
+    arguments: []
+    examples:
+      - "erase startup-config"
+    related_commands: ["reload", "copy running-config startup-config"]
+
+  - id: "monitor_capture"
+    full_command: "monitor capture"
+    tokens: ["monitor", "capture"]
+    abbreviations: ["mon cap", "monitor cap"]
+    mode: "enable"
+    description: "Embedded Packet Capture (EPC) — define, attach, start, or stop a capture"
+    risk_class: "configuration"
+    is_destructive: false
+    arguments:
+      - name: "name"
+        type: "word"
+        required: true
+        position: 2
+      - name: "action"
+        type: "word"
+        required: true
+        position: 3
+      - name: "param1"
+        type: "word"
+        required: false
+        position: 4
+      - name: "param2"
+        type: "word"
+        required: false
+        position: 5
+      - name: "param3"
+        type: "word"
+        required: false
+        position: 6
+    examples:
+      - "monitor capture DHCP-CAP interface GigabitEthernet0/0/0 both"
+      - "monitor capture DHCP-CAP access-list DHCP-CAP"
+      - "monitor capture DHCP-CAP buffer size 5 circular"
+      - "monitor capture DHCP-CAP start"
+      - "monitor capture DHCP-CAP stop"
+    related_commands: ["show monitor capture"]
+
+  - id: "no_monitor_capture"
+    full_command: "no monitor capture"
+    tokens: ["no", "monitor", "capture"]
+    abbreviations: ["no mon cap"]
+    mode: "enable"
+    description: "Removes a packet capture configuration"
+    risk_class: "configuration"
+    is_destructive: true
+    arguments:
+      - name: "name"
+        type: "word"
+        required: true
+        position: 3
+    examples:
+      - "no monitor capture DHCP-CAP"
+    related_commands: ["monitor capture"]

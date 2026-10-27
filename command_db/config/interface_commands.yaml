@@ -1,0 +1,192 @@
+commands:
+  - id: "description"
+    full_command: "description"
+    tokens: ["description"]
+    abbreviations: ["desc"]
+    mode: "config-if"
+    description: "Sets a human-readable description on the interface"
+    risk_class: "configuration"
+    is_destructive: false
+    arguments:
+      - name: "text"
+        type: "text"
+        required: true
+        position: 1
+    examples:
+      - "description Uplink to core"
+    related_commands: []
+
+  - id: "no_ip_address"
+    full_command: "no ip address"
+    tokens: ["no", "ip", "address"]
+    abbreviations: ["no ip add"]
+    mode: "config-if"
+    description: "Removes the IP address from the interface"
+    risk_class: "disruptive"
+    is_destructive: true
+    arguments: []
+    examples:
+      - "no ip address"
+    related_commands: ["ip address"]
+
+  - id: "switchport_mode_access"
+    full_command: "switchport mode access"
+    tokens: ["switchport", "mode", "access"]
+    abbreviations: ["sw mode acc", "swi mode access"]
+    mode: "config-if"
+    description: "Sets the interface to layer-2 access mode"
+    risk_class: "configuration"
+    is_destructive: false
+    arguments: []
+    examples:
+      - "switchport mode access"
+    related_commands: ["switchport access vlan", "switchport mode trunk"]
+
+  - id: "switchport_mode_trunk"
+    full_command: "switchport mode trunk"
+    tokens: ["switchport", "mode", "trunk"]
+    abbreviations: ["sw mode tr"]
+    mode: "config-if"
+    description: "Sets the interface to layer-2 trunk mode"
+    risk_class: "configuration"
+    is_destructive: false
+    arguments: []
+    examples:
+      - "switchport mode trunk"
+    related_commands: ["switchport trunk allowed vlan", "switchport mode access"]
+
+  - id: "switchport_access_vlan"
+    full_command: "switchport access vlan"
+    tokens: ["switchport", "access", "vlan"]
+    abbreviations: ["sw acc vlan"]
+    mode: "config-if"
+    description: "Assigns the access-mode interface to a VLAN"
+    risk_class: "configuration"
+    is_destructive: false
+    arguments:
+      - name: "vlan_id"
+        type: "vlan_id"
+        required: true
+        position: 3
+    examples:
+      - "switchport access vlan 10"
+    related_commands: ["switchport mode access", "vlan"]
+
+  - id: "switchport_trunk_allowed_vlan"
+    full_command: "switchport trunk allowed vlan"
+    tokens: ["switchport", "trunk", "allowed", "vlan"]
+    abbreviations: ["sw tr allowed vlan"]
+    mode: "config-if"
+    description: "Restricts which VLANs are allowed on this trunk"
+    risk_class: "configuration"
+    is_destructive: false
+    arguments:
+      - name: "vlans"
+        type: "vlan_list"
+        required: true
+        position: 4
+    examples:
+      - "switchport trunk allowed vlan 10,20,30"
+      - "switchport trunk allowed vlan 100-200"
+    related_commands: ["switchport mode trunk"]
+
+  - id: "speed"
+    full_command: "speed"
+    tokens: ["speed"]
+    abbreviations: []
+    mode: "config-if"
+    description: "Sets the interface speed"
+    risk_class: "configuration"
+    is_destructive: false
+    arguments:
+      - name: "speed"
+        type: "speed_setting"
+        required: true
+        position: 1
+    examples:
+      - "speed 1000"
+      - "speed auto"
+    related_commands: ["duplex"]
+
+  - id: "duplex"
+    full_command: "duplex"
+    tokens: ["duplex"]
+    abbreviations: []
+    mode: "config-if"
+    description: "Sets the interface duplex mode"
+    risk_class: "configuration"
+    is_destructive: false
+    arguments:
+      - name: "mode"
+        type: "duplex_mode"
+        required: true
+        position: 1
+    examples:
+      - "duplex full"
+      - "duplex auto"
+    related_commands: ["speed"]
+
+  - id: "mtu"
+    full_command: "mtu"
+    tokens: ["mtu"]
+    abbreviations: []
+    mode: "config-if"
+    description: "Sets the interface MTU in bytes"
+    risk_class: "configuration"
+    is_destructive: false
+    arguments:
+      - name: "size"
+        type: "mtu_size"
+        required: true
+        position: 1
+    examples:
+      - "mtu 1500"
+      - "mtu 9000"
+    related_commands: ["bandwidth"]
+
+  - id: "bandwidth"
+    full_command: "bandwidth"
+    tokens: ["bandwidth"]
+    abbreviations: []
+    mode: "config-if"
+    description: "Sets the informational bandwidth value (Kbps)"
+    risk_class: "configuration"
+    is_destructive: false
+    arguments:
+      - name: "kbps"
+        type: "bandwidth_kbps"
+        required: true
+        position: 1
+    examples:
+      - "bandwidth 100000"
+    related_commands: ["mtu"]
+
+  - id: "ip_helper_address"
+    full_command: "ip helper-address"
+    tokens: ["ip", "helper-address"]
+    abbreviations: []
+    mode: "config-if"
+    description: "Forwards UDP broadcasts (DHCP/etc.) to the specified server"
+    risk_class: "configuration"
+    is_destructive: false
+    arguments:
+      - name: "address"
+        type: "ipv4_address"
+        required: true
+        position: 2
+    examples:
+      - "ip helper-address 10.0.0.10"
+    related_commands: ["ip address"]
+
+  - id: "spanning_tree_portfast"
+    full_command: "spanning-tree portfast"
+    tokens: ["spanning-tree", "portfast"]
+    abbreviations: ["span portfast", "stp portfast"]
+    mode: "config-if"
+    description: "Enables PortFast on the interface (immediately transitions to forwarding)"
+    risk_class: "configuration"
+    is_destructive: false
+    arguments: []
+    examples:
+      - "spanning-tree portfast"
+    related_commands: ["spanning-tree bpduguard enable"]

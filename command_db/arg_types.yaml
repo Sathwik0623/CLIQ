@@ -1,0 +1,89 @@
+arg_types:
+  ipv4_address:
+    description: "IPv4 address (dotted decimal)"
+    regex: '^((25[0-5]|2[0-4]\d|1?\d?\d)\.){3}(25[0-5]|2[0-4]\d|1?\d?\d)$'
+    example: "192.168.1.1"
+  subnet_mask:
+    description: "IPv4 subnet mask"
+    regex: '^((255|254|252|248|240|224|192|128|0)\.){3}(255|254|252|248|240|224|192|128|0)$'
+    example: "255.255.255.0"
+  vlan_id:
+    description: "VLAN ID"
+    range: [1, 4094]
+    example: "100"
+  as_number:
+    description: "Autonomous System number"
+    range: [1, 4294967295]
+    example: "65001"
+  interface_name:
+    description: "Interface name (full or abbreviated)"
+    regex: '^(GigabitEthernet|TenGigabitEthernet|HundredGigE|FastEthernet|Ethernet|Loopback|Serial|Tunnel|Port-channel|Management|Vlan|vlan|Gi|gi|Te|te|Hu|Fa|fa|Et|et|Se|se|Lo|lo|Tu|tu|Po|po|Mg|mg|Vl|vl|[GgFfEeSsLlTt])\s?\d+(/\d+(\.\d+)?)*$'
+    example: "GigabitEthernet0/0"
+  hostname_or_ip:
+    description: "Hostname or IPv4 address"
+    regex: '^(([a-zA-Z][a-zA-Z0-9\-]*(\.[a-zA-Z][a-zA-Z0-9\-]*)*)|((25[0-5]|2[0-4]\d|1?\d?\d)\.){3}(25[0-5]|2[0-4]\d|1?\d?\d))$'
+    example: "8.8.8.8"
+  word:
+    description: "Generic single word/string"
+    regex: '^\S+$'
+    example: "myname"
+  text:
+    description: "Free text (any characters)"
+    regex: '.+'
+    example: "Link to HQ"
+  vlan_list:
+    description: "VLAN list (comma/range, e.g. 10,20,30-40)"
+    regex: '^[0-9,\-]+$'
+    example: "10,20,30-40"
+  bandwidth_kbps:
+    description: "Bandwidth in Kbps"
+    range: [1, 10000000]
+    example: "100000"
+  mtu_size:
+    description: "MTU in bytes"
+    range: [64, 9216]
+    example: "1500"
+  speed_setting:
+    description: "Interface speed (10, 100, 1000, auto)"
+    regex: '^(10|100|1000|auto)$'
+    example: "1000"
+  duplex_mode:
+    description: "Duplex setting (auto, half, full)"
+    regex: '^(auto|half|full)$'
+    example: "full"
+  line_type:
+    description: "Line type (console, vty, aux)"
+    regex: '^(console|con|vty|aux)$'
+    example: "vty"
+  port_number:
+    description: "L4 port number (1-65535)"
+    range: [1, 65535]
+    example: "67"
+  capture_direction:
+    description: "Packet capture direction (in, out, both)"
+    regex: '^(in|out|both)$'
+    example: "both"
+  capture_buffer_mode:
+    description: "Capture buffer behavior (linear, circular)"
+    regex: '^(linear|circular)$'
+    example: "circular"
+  acl_action:
+    description: "ACL action (permit or deny)"
+    regex: '^(permit|deny)$'
+    example: "permit"
+  ip_protocol:
+    description: "IP protocol keyword (ip, icmp, tcp, udp)"
+    regex: '^(ip|icmp|tcp|udp)$'
+    example: "udp"
+  acl_host_or_any:
+    description: "ACL source/destination spec (host <ip>, <ip> <wildcard>, or 'any')"
+    regex: '^(any)$'
+    example: "any"
+  vtp_mode:
+    description: "VTP operational mode"
+    regex: '^(server|client|transparent|off)$'
+    example: "server"
+  spanning_tree_priority:
+    description: "Spanning-tree bridge priority (multiple of 4096, 0-61440)"
+    regex: '^(0|4096|8192|12288|16384|20480|24576|28672|32768|36864|40960|45056|49152|53248|57344|61440)$'
+    example: "4096"

@@ -1,0 +1,63 @@
+commands:
+  - id: "permit"
+    full_command: "permit"
+    tokens: ["permit"]
+    abbreviations: []
+    mode: "config-ext-nacl"
+    description: "Adds a permit ACE to the extended ACL"
+    risk_class: "configuration"
+    is_destructive: false
+    arguments:
+      - name: "protocol"
+        type: "ip_protocol"
+        required: true
+        position: 1
+      - name: "source_spec"
+        type: "word"
+        required: true
+        position: 2
+    examples:
+      - "permit udp any any eq 67"
+      - "permit udp any any eq 68"
+      - "permit ip any any"
+      - "permit tcp host 10.0.0.1 any eq 22"
+    related_commands: ["deny", "exit"]
+
+  - id: "deny"
+    full_command: "deny"
+    tokens: ["deny"]
+    abbreviations: []
+    mode: "config-ext-nacl"
+    description: "Adds a deny ACE to the extended ACL"
+    risk_class: "configuration"
+    is_destructive: false
+    arguments:
+      - name: "protocol"
+        type: "ip_protocol"
+        required: true
+        position: 1
+      - name: "source_spec"
+        type: "word"
+        required: true
+        position: 2
+    examples:
+      - "deny ip any any"
+      - "deny tcp any any eq 23"
+    related_commands: ["permit", "exit"]
+
+  - id: "remark"
+    full_command: "remark"
+    tokens: ["remark"]
+    abbreviations: []
+    mode: "config-ext-nacl"
+    description: "Adds a comment line to the ACL"
+    risk_class: "configuration"
+    is_destructive: false
+    arguments:
+      - name: "text"
+        type: "text"
+        required: true
+        position: 1
+    examples:
+      - "remark Capture DHCP traffic for troubleshooting"
+    related_commands: ["permit", "deny"]

@@ -1,0 +1,108 @@
+# OSPF Preliminary Troubleshooting Toolkit (Phase 5 — scenario-based advisory).
+#
+# This is a CURATED, human-verified shortlist of diagnostic commands surfaced
+# when an engineer shows intent to troubleshoot OSPF. It is ADVISORY ONLY:
+# nothing is auto-run — every command is presented for explicit review/insert.
+#
+# The schema is data-driven and EXTENSIBLE: a new protocol (EIGRP, BGP, …) is
+# added by dropping a sibling YAML file (eigrp.yaml, bgp.yaml) into this
+# directory — no advisory code changes are required. The loader
+# (cliq.intelligence.troubleshooting) discovers every *.yaml here.
+#
+# Fields:
+#   protocol             machine key (also the intent keyword root).
+#   title                panel heading.
+#   required_capability  'routing' | 'switching' — the toolkit is SUPPRESSED on
+#                        a device whose detected capability set lacks this class
+#                        (e.g. OSPF is hidden on an L2-only switch).
+#   intent               conservative trigger definition (see below).
+#   phases               ordered diagnostic groups; each has an ordered command
+#                        list. Optional per-command one-line `description`.
+#                        `impactful: true` marks a command (e.g. debug) that can
+#                        flood the console on a live device — the UI flags it and
+#                        it is NEVER auto-run.
+
+protocol: ospf
+title: OSPF Preliminary Troubleshooting Toolkit
+required_capability: routing
+
+# Intent detection is deliberately CONSERVATIVE so it does not fire during
+# unrelated typing:
+#   * protocol_aliases — synonyms for the protocol (a match requires one of
+#                        these AND a signal word, so a bare alias never fires).
+#   * triggers         — PROTOCOL-SPECIFIC signal words, merged on top of the
+#                        built-in default signals (troubleshoot / working-on /
+#                        need-commands / help-with / debug / check …).
+#   * phrases          — explicit full phrases; any substring match triggers.
+#   * command_prefixes — a query that *is* a partial OSPF command (e.g. typing
+#                        `show ip ospf`) also triggers it.
+intent:
+  keywords: ["ospf"]
+  protocol_aliases: ["ospf", "ospfv2", "ospfv3", "open shortest path first"]
+  triggers: ["adjacency", "neighbor", "neighbour", "lsa", "spf", "area", "dr", "bdr"]
+  phrases:
+    - "troubleshoot ospf"
+    - "troubleshooting ospf"
+    - "working on ospf"
+    - "ospf neighbor down"
+    - "ospf neighbour down"
+    - "ospf neighbor is down"
+    - "ospf adjacency"
+    - "ospf not forming"
+    - "ospf stuck"
+    - "ospf flapping"
+    - "why is my ospf"
+    - "why is ospf"
+    - "ospf not working"
+    - "debug ospf"
+  command_prefixes:
+    - "show ip ospf"
+    - "debug ip ospf"
+
+# Feature 3 — command discovery / reference. Seeds the live device ?-tree walk
+# and the learned/KB retrieval for "show me all OSPF commands" style queries.
+discovery:
+  walk_paths:
+    - "show ip ospf"
+    - "debug ip ospf"
+    - "clear ip ospf"
+  learned_prefixes:
+    - "show ip ospf"
+    - "debug ip ospf"
+    - "clear ip ospf"
+  kb_query: "ospf"
+
+phases:
+  - name: Neighbor/Adjacency
+    commands:
+      - command: show ip ospf neighbor
+        description: Lists OSPF neighbors and adjacency state — look for FULL vs stuck in INIT/EXSTART/2-WAY.
+      - command: show ip ospf neighbor detail
+        description: Per-neighbor detail (dead timer, DR/BDR, retransmit queue) for a stuck adjacency.
+      - command: show ip ospf interface brief
+        description: Shows which interfaces run OSPF, their area, cost, and neighbor count.
+
+  - name: Process/Config
+    commands:
+      - command: show ip ospf
+        description: OSPF process summary — router ID, areas, SPF timers, and reference bandwidth.
+      - command: show ip protocols
+        description: Confirms OSPF is running, its networks/interfaces, and any distribute-lists.
+      - command: show running-config | section ospf
+        description: Reveals the configured OSPF process, network statements, and interface OSPF settings.
+
+  - name: Routing State
+    commands:
+      - command: show ip route ospf
+        description: OSPF-learned routes actually installed in the RIB (O / O IA / O E2).
+      - command: show ip ospf database
+        description: Link-state database — verify LSAs are present and consistent across neighbors.
+
+  - name: Deeper Diagnostics
+    commands:
+      - command: debug ip ospf adj
+        description: Traces adjacency formation (hellos, DBD exchange) — use only briefly on a live device.
+        impactful: true
+      - command: debug ip ospf events
+        description: Traces OSPF hello/DR-BDR/SPF events — can flood the console; disable with 'undebug all'.
+        impactful: true

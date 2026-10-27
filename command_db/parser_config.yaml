@@ -1,0 +1,144 @@
+# ---------------------------------------------------------------------------
+# parser_config.yaml — Configuration for the CLIQ command-reference parser.
+#
+# This file decouples the parser's *knowledge* (what a command looks like, how
+# layouts are labelled, how modes are named) from its *logic*. Adding support
+# for a new platform's vocabulary or a new layout label should only require
+# editing this file — never the extractor code.
+# ---------------------------------------------------------------------------
+
+# Verbs/keywords that can legitimately begin a CLI command. A line is only
+# considered a "command heading" if its first token appears here. Extend this
+# list to teach the parser about new command families without touching code.
+command_verbs:
+  - show
+  - configure
+  - clear
+  - "no"
+  - interface
+  - router
+  - ip
+  - ipv6
+  - vlan
+  - debug
+  - set
+  - switchport
+  - spanning-tree
+  - channel-group
+  - access-list
+  - mac
+  - arp
+  - snmp-server
+  - logging
+  - ntp
+  - hostname
+  - shutdown
+  - speed
+  - duplex
+  - description
+  - bandwidth
+  - mtu
+  - service
+  - line
+  - banner
+  - username
+  - enable
+  - aaa
+  - crypto
+  - tunnel
+  - standby
+  - vrrp
+  - glbp
+  - mpls
+  - bgp
+  - ospf
+  - eigrp
+  - rip
+  - route-map
+  - prefix-list
+  - class-map
+  - policy-map
+  - qos
+  - storm-control
+  - errdisable
+  - boot
+  - license
+  - feature
+  - system
+  - monitor
+  - ping
+  - traceroute
+  - copy
+  - write
+  - reload
+  - default
+
+# Labelled sub-section headings that appear *inside* a single command entry in
+# Cisco references. They delimit blocks (syntax vs. description vs. mode, etc.)
+# so the parser can route each block to the right field. Matched case-insensitively.
+section_headings:
+  - Syntax
+  - Syntax Description
+  - Description
+  - Command Default
+  - Command Modes
+  - Command History
+  - Usage Guidelines
+  - Examples
+  - Related Commands
+  - Defaults
+
+# Section headings whose body text should be folded into the `description`
+# field (in addition to the intro block that precedes the first section).
+description_sections:
+  - description
+  - usage guidelines
+
+# Section headings whose body lines should be collected as `syntax_variants`.
+syntax_sections:
+  - syntax
+  - syntax description
+
+# Maps the mode phrases that appear in a "Command Modes" block (or inline in
+# the intro sentence, e.g. "...in privileged EXEC mode") to CLIQ's mode names.
+# Longer/more-specific phrases are matched first. Matched case-insensitively.
+mode_phrases:
+  "user exec": exec
+  "privileged exec": enable
+  "global configuration": config
+  "interface configuration": config-if
+  "subinterface configuration": config-subif
+  "router configuration": config-router
+  "line configuration": config-line
+  "vlan configuration": config-vlan
+  "extended named access list": config-ext-nacl
+
+# Regex patterns for lines that are pure noise (page numbers, table-of-contents
+# dot-leaders, chapter rules). Any line fully matching one of these is dropped
+# and counted toward `lines_skipped_noise`. (The parser additionally detects the
+# whole Table-of-Contents region and rejects PART/CHAPTER headings and trailing
+# page numbers structurally — these regexes only catch single throwaway lines.)
+noise_patterns:
+  - '^\s*\d+\s*$'                       # a lone page number
+  - '^\s*[-–—_=]{3,}\s*$'               # horizontal rules / separators
+  - '.*\.{4,}\s*\d+\s*$'                # TOC dot-leader entries ("Foo ..... 12")
+  - '^\s*page\s+\d+\s*(of\s+\d+)?\s*$'  # "Page 3 of 40"
+  - '^\s*chapter\s+\d+\s*$'             # bare chapter markers
+  - '^\s*part\s+[ivxlcdm0-9]+\s*$'      # bare part dividers ("PART IV", "PART 4")
+  - '^\s*appendix\s+[a-z0-9]+\s*$'      # bare appendix markers
+  - '^\s*table\s+of\s+contents\s*$'     # the TOC title line itself
+
+# Single words that name a configuration-mode CONTEXT or a section rather than a
+# standalone command. These mode-entering keywords always need arguments in a
+# real command (e.g. "interface type number", "router bgp"), so a BARE one-word
+# candidate equal to one of these is treated as a mode/section label and rejected
+# unless it carries an argument-bearing syntax block or a command-style
+# description. Matched case-insensitively.
+mode_context_labels:
+  - vlan
+  - interface
+  - line
+  - router
+  - controller
+  - vrf
+

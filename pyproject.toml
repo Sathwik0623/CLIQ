@@ -1,0 +1,45 @@
+[project]
+name = "cliq-cli"
+version = "0.1.0"
+description = "Contextual Live Intelligence Quotient - CLI intelligence for Cisco engineers"
+requires-python = ">=3.11"
+dependencies = [
+    "prompt_toolkit>=3.0",
+    "rich>=13.0",
+    "netmiko>=4.0",
+    "ntc-templates>=4.0",
+    "textfsm>=1.1",
+    "pyyaml>=6.0",
+    "fastapi>=0.115.0",
+    "uvicorn[standard]>=0.30.0",
+    "requests>=2.31.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest", "pytest-cov", "ruff", "black", "mypy"]
+# Document-ingestion parser (Phase 1A). PDF/DOCX support is optional so the
+# core CLI runs without these heavier, local-only parsing libraries. wordninja
+# is a small, fully-offline language model used to rebuild word boundaries in
+# PDFs whose text stream lacks inter-word spaces.
+ingest = ["pypdf>=4.0", "python-docx>=1.1", "wordninja>=2.0"]
+# Optional local semantic embeddings for the storage layer (Phase 1B/1C). The
+# pipeline ships a dependency-free local hashing embedder + SQLite vector store,
+# so these are only needed to upgrade to neural embeddings / Chroma — still
+# fully on-prem (no cloud APIs).
+ingest-semantic = ["sentence-transformers>=2.2", "chromadb>=0.5"]
+# CML integration layer (Phase 0). Pinned to 2.9.0 to match NetSim CML 2.9.0.
+# Optional + additive: only the labs/topology/auth/events/metrics path uses it.
+# The interactive terminal path (netmiko console proxy) is unaffected.
+cml = ["virl2_client==2.9.0"]
+
+[project.scripts]
+cliq = "cliq.__main__:main"     # enables `cliq` command after install
+
+[tool.ruff]
+line-length = 100
+
+[tool.pytest.ini_options]
+markers = ["live: tests requiring live CML connection (opt-in)"]
+
+[tool.setuptools.packages.find]
+where = ["src"]

@@ -1,0 +1,78 @@
+commands:
+  - id: "network"
+    full_command: "network"
+    tokens: ["network"]
+    abbreviations: []
+    mode: "config-router"
+    description: "Specifies a network to advertise / participate in the routing process"
+    risk_class: "configuration"
+    is_destructive: false
+    arguments:
+      - name: "network"
+        type: "ipv4_address"
+        required: true
+        position: 1
+      - name: "wildcard"
+        type: "ipv4_address"
+        required: false
+        position: 2
+    examples:
+      - "network 10.0.0.0 0.255.255.255 area 0"
+      - "network 192.168.1.0 0.0.0.255 area 0"
+    related_commands: ["router ospf", "passive-interface"]
+
+  - id: "router_id"
+    full_command: "router-id"
+    tokens: ["router-id"]
+    abbreviations: []
+    mode: "config-router"
+    description: "Sets the routing process router-id"
+    risk_class: "configuration"
+    is_destructive: false
+    arguments:
+      - name: "id"
+        type: "ipv4_address"
+        required: true
+        position: 1
+    examples:
+      - "router-id 1.1.1.1"
+    related_commands: ["router ospf"]
+
+  - id: "passive_interface"
+    full_command: "passive-interface"
+    tokens: ["passive-interface"]
+    abbreviations: []
+    mode: "config-router"
+    description: "Suppresses routing updates on an interface"
+    risk_class: "configuration"
+    is_destructive: false
+    arguments:
+      - name: "interface"
+        type: "interface_name"
+        required: true
+        position: 1
+    examples:
+      - "passive-interface GigabitEthernet0/1"
+    related_commands: ["network"]
+
+  - id: "spanning_tree_priority"
+    full_command: "spanning-tree vlan"
+    tokens: ["spanning-tree", "vlan"]
+    abbreviations: ["span vlan", "stp vlan"]
+    mode: "config"
+    description: "Sets the spanning-tree bridge priority for a VLAN"
+    risk_class: "configuration"
+    is_destructive: false
+    arguments:
+      - name: "vlan_id"
+        type: "vlan_id"
+        required: true
+        position: 2
+      - name: "priority"
+        type: "spanning_tree_priority"
+        required: true
+        position: 4
+    examples:
+      - "spanning-tree vlan 1 priority 4096"
+      - "spanning-tree vlan 100 priority 8192"
+    related_commands: ["show spanning-tree", "spanning-tree portfast"]

@@ -1,0 +1,1912 @@
+commands:
+- id: live_show_etherchannel
+  full_command: show etherchannel
+  tokens:
+  - show
+  - etherchannel
+  abbreviations:
+  - sho eth
+  mode: exec
+  description: 'Live-discovered switch command from CML: show etherchannel'
+  risk_class: informational
+  is_destructive: false
+  arguments: []
+  examples:
+  - show etherchannel
+  related_commands: []
+- id: live_show_etherchannel_channel_group
+  full_command: show etherchannel Channel-group
+  tokens:
+  - show
+  - etherchannel
+  - Channel-group
+  abbreviations:
+  - sho eth Cha
+  mode: exec
+  description: 'Live-discovered switch command from CML: show etherchannel Channel-group'
+  risk_class: informational
+  is_destructive: false
+  arguments: []
+  examples:
+  - show etherchannel Channel-group
+  related_commands: []
+- id: live_show_etherchannel_auto
+  full_command: show etherchannel auto
+  tokens:
+  - show
+  - etherchannel
+  - auto
+  abbreviations:
+  - sho eth aut
+  mode: exec
+  description: 'Live-discovered switch command from CML: show etherchannel auto'
+  risk_class: informational
+  is_destructive: false
+  arguments: []
+  examples:
+  - show etherchannel auto
+  related_commands: []
+- id: live_show_etherchannel_detail
+  full_command: show etherchannel detail
+  tokens:
+  - show
+  - etherchannel
+  - detail
+  abbreviations:
+  - sho eth det
+  mode: exec
+  description: 'Live-discovered switch command from CML: show etherchannel detail'
+  risk_class: informational
+  is_destructive: false
+  arguments: []
+  examples:
+  - show etherchannel detail
+  related_commands: []
+- id: live_show_etherchannel_load_balance
+  full_command: show etherchannel load-balance
+  tokens:
+  - show
+  - etherchannel
+  - load-balance
+  abbreviations:
+  - sho eth loa
+  mode: exec
+  description: 'Live-discovered switch command from CML: show etherchannel load-balance'
+  risk_class: informational
+  is_destructive: false
+  arguments: []
+  examples:
+  - show etherchannel load-balance
+  related_commands: []
+- id: live_show_etherchannel_port
+  full_command: show etherchannel port
+  tokens:
+  - show
+  - etherchannel
+  - port
+  abbreviations:
+  - sho eth por
+  mode: exec
+  description: 'Live-discovered switch command from CML: show etherchannel port'
+  risk_class: informational
+  is_destructive: false
+  arguments: []
+  examples:
+  - show etherchannel port
+  related_commands: []
+- id: live_show_etherchannel_port_channel
+  full_command: show etherchannel port-channel
+  tokens:
+  - show
+  - etherchannel
+  - port-channel
+  abbreviations:
+  - sho eth por
+  mode: exec
+  description: 'Live-discovered switch command from CML: show etherchannel port-channel'
+  risk_class: informational
+  is_destructive: false
+  arguments: []
+  examples:
+  - show etherchannel port-channel
+  related_commands: []
+- id: live_show_etherchannel_protocol
+  full_command: show etherchannel protocol
+  tokens:
+  - show
+  - etherchannel
+  - protocol
+  abbreviations:
+  - sho eth pro
+  mode: exec
+  description: 'Live-discovered switch command from CML: show etherchannel protocol'
+  risk_class: informational
+  is_destructive: false
+  arguments: []
+  examples:
+  - show etherchannel protocol
+  related_commands: []
+- id: live_show_etherchannel_summary
+  full_command: show etherchannel summary
+  tokens:
+  - show
+  - etherchannel
+  - summary
+  abbreviations:
+  - sho eth sum
+  mode: exec
+  description: 'Live-discovered switch command from CML: show etherchannel summary'
+  risk_class: informational
+  is_destructive: false
+  arguments: []
+  examples:
+  - show etherchannel summary
+  related_commands: []
+- id: live_show_inventory
+  full_command: show inventory
+  tokens:
+  - show
+  - inventory
+  abbreviations:
+  - sho inv
+  mode: exec
+  description: 'Live-discovered switch command from CML: show inventory'
+  risk_class: informational
+  is_destructive: false
+  arguments: []
+  examples:
+  - show inventory
+  related_commands: []
+- id: live_show_inventory_oid
+  full_command: show inventory oid
+  tokens:
+  - show
+  - inventory
+  - oid
+  abbreviations:
+  - sho inv oid
+  mode: exec
+  description: 'Live-discovered switch command from CML: show inventory oid'
+  risk_class: informational
+  is_destructive: false
+  arguments: []
+  examples:
+  - show inventory oid
+  related_commands: []
+- id: live_show_inventory_raw
+  full_command: show inventory raw
+  tokens:
+  - show
+  - inventory
+  - raw
+  abbreviations:
+  - sho inv raw
+  mode: exec
+  description: 'Live-discovered switch command from CML: show inventory raw'
+  risk_class: informational
+  is_destructive: false
+  arguments: []
+  examples:
+  - show inventory raw
+  related_commands: []
+- id: live_show_ip
+  full_command: show ip
+  tokens:
+  - show
+  - ip
+  abbreviations:
+  - sho ip
+  mode: exec
+  description: 'Live-discovered switch command from CML: show ip'
+  risk_class: informational
+  is_destructive: false
+  arguments: []
+  examples:
+  - show ip
+  related_commands: []
+- id: live_show_ip_accounting
+  full_command: show ip accounting
+  tokens:
+  - show
+  - ip
+  - accounting
+  abbreviations:
+  - sho ip acc
+  mode: exec
+  description: 'Live-discovered switch command from CML: show ip accounting'
+  risk_class: informational
+  is_destructive: false
+  arguments: []
+  examples:
+  - show ip accounting
+  related_commands: []
+- id: live_show_ip_admission
+  full_command: show ip admission
+  tokens:
+  - show
+  - ip
+  - admission
+  abbreviations:
+  - sho ip adm
+  mode: exec
+  description: 'Live-discovered switch command from CML: show ip admission'
+  risk_class: informational
+  is_destructive: false
+  arguments: []
+  examples:
+  - show ip admission
+  related_commands: []
+- id: live_show_ip_aliases
+  full_command: show ip aliases
+  tokens:
+  - show
+  - ip
+  - aliases
+  abbreviations:
+  - sho ip ali
+  mode: exec
+  description: 'Live-discovered switch command from CML: show ip aliases'
+  risk_class: informational
+  is_destructive: false
+  arguments: []
+  examples:
+  - show ip aliases
+  related_commands: []
+- id: live_show_ip_arp
+  full_command: show ip arp
+  tokens:
+  - show
+  - ip
+  - arp
+  abbreviations:
+  - sho ip arp
+  mode: exec
+  description: 'Live-discovered switch command from CML: show ip arp'
+  risk_class: informational
+  is_destructive: false
+  arguments: []
+  examples:
+  - show ip arp
+  related_commands: []
+- id: live_show_ip_as_path_access_list
+  full_command: show ip as-path-access-list
+  tokens:
+  - show
+  - ip
+  - as-path-access-list
+  abbreviations:
+  - sho ip as-
+  mode: exec
+  description: 'Live-discovered switch command from CML: show ip as-path-access-list'
+  risk_class: informational
+  is_destructive: false
+  arguments: []
+  examples:
+  - show ip as-path-access-list
+  related_commands: []
+- id: live_show_ip_bgp
+  full_command: show ip bgp
+  tokens:
+  - show
+  - ip
+  - bgp
+  abbreviations:
+  - sho ip bgp
+  mode: exec
+  description: 'Live-discovered switch command from CML: show ip bgp'
+  risk_class: informational
+  is_destructive: false
+  arguments: []
+  examples:
+  - show ip bgp
+  related_commands: []
+- id: live_show_ip_cache
+  full_command: show ip cache
+  tokens:
+  - show
+  - ip
+  - cache
+  abbreviations:
+  - sho ip cac
+  mode: exec
+  description: 'Live-discovered switch command from CML: show ip cache'
+  risk_class: informational
+  is_destructive: false
+  arguments: []
+  examples:
+  - show ip cache
+  related_commands: []
+- id: live_show_ip_casa
+  full_command: show ip casa
+  tokens:
+  - show
+  - ip
+  - casa
+  abbreviations:
+  - sho ip cas
+  mode: exec
+  description: 'Live-discovered switch command from CML: show ip casa'
+  risk_class: informational
+  is_destructive: false
+  arguments: []
+  examples:
+  - show ip casa
+  related_commands: []
+- id: live_show_ip_cef
+  full_command: show ip cef
+  tokens:
+  - show
+  - ip
+  - cef
+  abbreviations:
+  - sho ip cef
+  mode: exec
+  description: 'Live-discovered switch command from CML: show ip cef'
+  risk_class: informational
+  is_destructive: false
+  arguments: []
+  examples:
+  - show ip cef
+  related_commands: []
+- id: live_show_ip_dfp
+  full_command: show ip dfp
+  tokens:
+  - show
+  - ip
+  - dfp
+  abbreviations:
+  - sho ip dfp
+  mode: exec
+  description: 'Live-discovered switch command from CML: show ip dfp'
+  risk_class: informational
+  is_destructive: false
+  arguments: []
+  examples:
+  - show ip dfp
+  related_commands: []
+- id: live_show_ip_dhcp
+  full_command: show ip dhcp
+  tokens:
+  - show
+  - ip
+  - dhcp
+  abbreviations:
+  - sho ip dhc
+  mode: exec
+  description: 'Live-discovered switch command from CML: show ip dhcp'
+  risk_class: informational
+  is_destructive: false
+  arguments: []
+  examples:
+  - show ip dhcp
+  related_commands: []
+- id: live_show_ip_drp
+  full_command: show ip drp
+  tokens:
+  - show
+  - ip
+  - drp
+  abbreviations:
+  - sho ip drp
+  mode: exec
+  description: 'Live-discovered switch command from CML: show ip drp'
+  risk_class: informational
+  is_destructive: false
+  arguments: []
+  examples:
+  - show ip drp
+  related_commands: []
+- id: live_show_ip_eigrp
+  full_command: show ip eigrp
+  tokens:
+  - show
+  - ip
+  - eigrp
+  abbreviations:
+  - sho ip eig
+  mode: exec
+  description: 'Live-discovered switch command from CML: show ip eigrp'
+  risk_class: informational
+  is_destructive: false
+  arguments: []
+  examples:
+  - show ip eigrp
+  related_commands: []
+- id: live_show_ip_explicit_paths
+  full_command: show ip explicit-paths
+  tokens:
+  - show
+  - ip
+  - explicit-paths
+  abbreviations:
+  - sho ip exp
+  mode: exec
+  description: 'Live-discovered switch command from CML: show ip explicit-paths'
+  risk_class: informational
+  is_destructive: false
+  arguments: []
+  examples:
+  - show ip explicit-paths
+  related_commands: []
+- id: live_show_ip_extcommunity_list
+  full_command: show ip extcommunity-list
+  tokens:
+  - show
+  - ip
+  - extcommunity-list
+  abbreviations:
+  - sho ip ext
+  mode: exec
+  description: 'Live-discovered switch command from CML: show ip extcommunity-list'
+  risk_class: informational
+  is_destructive: false
+  arguments: []
+  examples:
+  - show ip extcommunity-list
+  related_commands: []
+- id: live_show_ip_flow
+  full_command: show ip flow
+  tokens:
+  - show
+  - ip
+  - flow
+  abbreviations:
+  - sho ip flo
+  mode: exec
+  description: 'Live-discovered switch command from CML: show ip flow'
+  risk_class: informational
+  is_destructive: false
+  arguments: []
+  examples:
+  - show ip flow
+  related_commands: []
+- id: live_show_ip_helper_address
+  full_command: show ip helper-address
+  tokens:
+  - show
+  - ip
+  - helper-address
+  abbreviations:
+  - sho ip hel
+  mode: exec
+  description: 'Live-discovered switch command from CML: show ip helper-address'
+  risk_class: informational
+  is_destructive: false
+  arguments: []
+  examples:
+  - show ip helper-address
+  related_commands: []
+- id: live_show_ip_host
+  full_command: show ip host
+  tokens:
+  - show
+  - ip
+  - host
+  abbreviations:
+  - sho ip hos
+  mode: exec
+  description: 'Live-discovered switch command from CML: show ip host'
+  risk_class: informational
+  is_destructive: false
+  arguments: []
+  examples:
+  - show ip host
+  related_commands: []
+- id: live_show_ip_http
+  full_command: show ip http
+  tokens:
+  - show
+  - ip
+  - http
+  abbreviations:
+  - sho ip htt
+  mode: exec
+  description: 'Live-discovered switch command from CML: show ip http'
+  risk_class: informational
+  is_destructive: false
+  arguments: []
+  examples:
+  - show ip http
+  related_commands: []
+- id: live_show_ip_igmp
+  full_command: show ip igmp
+  tokens:
+  - show
+  - ip
+  - igmp
+  abbreviations:
+  - sho ip igm
+  mode: exec
+  description: 'Live-discovered switch command from CML: show ip igmp'
+  risk_class: informational
+  is_destructive: false
+  arguments: []
+  examples:
+  - show ip igmp
+  related_commands: []
+- id: live_show_ip_interface
+  full_command: show ip interface
+  tokens:
+  - show
+  - ip
+  - interface
+  abbreviations:
+  - sho ip int
+  mode: exec
+  description: 'Live-discovered switch command from CML: show ip interface'
+  risk_class: informational
+  is_destructive: false
+  arguments: []
+  examples:
+  - show ip interface
+  related_commands: []
+- id: live_show_ip_irdp
+  full_command: show ip irdp
+  tokens:
+  - show
+  - ip
+  - irdp
+  abbreviations:
+  - sho ip ird
+  mode: exec
+  description: 'Live-discovered switch command from CML: show ip irdp'
+  risk_class: informational
+  is_destructive: false
+  arguments: []
+  examples:
+  - show ip irdp
+  related_commands: []
+- id: live_show_ip_lisp
+  full_command: show ip lisp
+  tokens:
+  - show
+  - ip
+  - lisp
+  abbreviations:
+  - sho ip lis
+  mode: exec
+  description: 'Live-discovered switch command from CML: show ip lisp'
+  risk_class: informational
+  is_destructive: false
+  arguments: []
+  examples:
+  - show ip lisp
+  related_commands: []
+- id: live_show_ip_local
+  full_command: show ip local
+  tokens:
+  - show
+  - ip
+  - local
+  abbreviations:
+  - sho ip loc
+  mode: exec
+  description: 'Live-discovered switch command from CML: show ip local'
+  risk_class: informational
+  is_destructive: false
+  arguments: []
+  examples:
+  - show ip local
+  related_commands: []
+- id: live_show_ip_masks
+  full_command: show ip masks
+  tokens:
+  - show
+  - ip
+  - masks
+  abbreviations:
+  - sho ip mas
+  mode: exec
+  description: 'Live-discovered switch command from CML: show ip masks'
+  risk_class: informational
+  is_destructive: false
+  arguments: []
+  examples:
+  - show ip masks
+  related_commands: []
+- id: live_show_ipc
+  full_command: show ipc
+  tokens:
+  - show
+  - ipc
+  abbreviations:
+  - sho ipc
+  mode: exec
+  description: 'Live-discovered switch command from CML: show ipc'
+  risk_class: informational
+  is_destructive: false
+  arguments: []
+  examples:
+  - show ipc
+  related_commands: []
+- id: live_show_ipc_app
+  full_command: show ipc app
+  tokens:
+  - show
+  - ipc
+  - app
+  abbreviations:
+  - sho ipc app
+  mode: exec
+  description: 'Live-discovered switch command from CML: show ipc app'
+  risk_class: informational
+  is_destructive: false
+  arguments: []
+  examples:
+  - show ipc app
+  related_commands: []
+- id: live_show_ipc_buffer
+  full_command: show ipc buffer
+  tokens:
+  - show
+  - ipc
+  - buffer
+  abbreviations:
+  - sho ipc buf
+  mode: exec
+  description: 'Live-discovered switch command from CML: show ipc buffer'
+  risk_class: informational
+  is_destructive: false
+  arguments: []
+  examples:
+  - show ipc buffer
+  related_commands: []
+- id: live_show_ipc_delayed
+  full_command: show ipc delayed
+  tokens:
+  - show
+  - ipc
+  - delayed
+  abbreviations:
+  - sho ipc del
+  mode: exec
+  description: 'Live-discovered switch command from CML: show ipc delayed'
+  risk_class: informational
+  is_destructive: false
+  arguments: []
+  examples:
+  - show ipc delayed
+  related_commands: []
+- id: live_show_ipc_hog_info
+  full_command: show ipc hog-info
+  tokens:
+  - show
+  - ipc
+  - hog-info
+  abbreviations:
+  - sho ipc hog
+  mode: exec
+  description: 'Live-discovered switch command from CML: show ipc hog-info'
+  risk_class: informational
+  is_destructive: false
+  arguments: []
+  examples:
+  - show ipc hog-info
+  related_commands: []
+- id: live_show_ipc_keepalive
+  full_command: show ipc keepalive
+  tokens:
+  - show
+  - ipc
+  - keepalive
+  abbreviations:
+  - sho ipc kee
+  mode: exec
+  description: 'Live-discovered switch command from CML: show ipc keepalive'
+  risk_class: informational
+  is_destructive: false
+  arguments: []
+  examples:
+  - show ipc keepalive
+  related_commands: []
+- id: live_show_ipc_nodes
+  full_command: show ipc nodes
+  tokens:
+  - show
+  - ipc
+  - nodes
+  abbreviations:
+  - sho ipc nod
+  mode: exec
+  description: 'Live-discovered switch command from CML: show ipc nodes'
+  risk_class: informational
+  is_destructive: false
+  arguments: []
+  examples:
+  - show ipc nodes
+  related_commands: []
+- id: live_show_ipc_ports
+  full_command: show ipc ports
+  tokens:
+  - show
+  - ipc
+  - ports
+  abbreviations:
+  - sho ipc por
+  mode: exec
+  description: 'Live-discovered switch command from CML: show ipc ports'
+  risk_class: informational
+  is_destructive: false
+  arguments: []
+  examples:
+  - show ipc ports
+  related_commands: []
+- id: live_show_ipc_queue
+  full_command: show ipc queue
+  tokens:
+  - show
+  - ipc
+  - queue
+  abbreviations:
+  - sho ipc que
+  mode: exec
+  description: 'Live-discovered switch command from CML: show ipc queue'
+  risk_class: informational
+  is_destructive: false
+  arguments: []
+  examples:
+  - show ipc queue
+  related_commands: []
+- id: live_show_ipc_rpc
+  full_command: show ipc rpc
+  tokens:
+  - show
+  - ipc
+  - rpc
+  abbreviations:
+  - sho ipc rpc
+  mode: exec
+  description: 'Live-discovered switch command from CML: show ipc rpc'
+  risk_class: informational
+  is_destructive: false
+  arguments: []
+  examples:
+  - show ipc rpc
+  related_commands: []
+- id: live_show_ipc_status
+  full_command: show ipc status
+  tokens:
+  - show
+  - ipc
+  - status
+  abbreviations:
+  - sho ipc sta
+  mode: exec
+  description: 'Live-discovered switch command from CML: show ipc status'
+  risk_class: informational
+  is_destructive: false
+  arguments: []
+  examples:
+  - show ipc status
+  related_commands: []
+- id: live_show_ipc_trace
+  full_command: show ipc trace
+  tokens:
+  - show
+  - ipc
+  - trace
+  abbreviations:
+  - sho ipc tra
+  mode: exec
+  description: 'Live-discovered switch command from CML: show ipc trace'
+  risk_class: informational
+  is_destructive: false
+  arguments: []
+  examples:
+  - show ipc trace
+  related_commands: []
+- id: live_show_ipc_util
+  full_command: show ipc util
+  tokens:
+  - show
+  - ipc
+  - util
+  abbreviations:
+  - sho ipc uti
+  mode: exec
+  description: 'Live-discovered switch command from CML: show ipc util'
+  risk_class: informational
+  is_destructive: false
+  arguments: []
+  examples:
+  - show ipc util
+  related_commands: []
+- id: live_show_ipc_watermark
+  full_command: show ipc watermark
+  tokens:
+  - show
+  - ipc
+  - watermark
+  abbreviations:
+  - sho ipc wat
+  mode: exec
+  description: 'Live-discovered switch command from CML: show ipc watermark'
+  risk_class: informational
+  is_destructive: false
+  arguments: []
+  examples:
+  - show ipc watermark
+  related_commands: []
+- id: live_show_ipc_zones
+  full_command: show ipc zones
+  tokens:
+  - show
+  - ipc
+  - zones
+  abbreviations:
+  - sho ipc zon
+  mode: exec
+  description: 'Live-discovered switch command from CML: show ipc zones'
+  risk_class: informational
+  is_destructive: false
+  arguments: []
+  examples:
+  - show ipc zones
+  related_commands: []
+- id: live_show_ipv6
+  full_command: show ipv6
+  tokens:
+  - show
+  - ipv6
+  abbreviations:
+  - sho ipv
+  mode: exec
+  description: 'Live-discovered switch command from CML: show ipv6'
+  risk_class: informational
+  is_destructive: false
+  arguments: []
+  examples:
+  - show ipv6
+  related_commands: []
+- id: live_show_ipv6_access_list
+  full_command: show ipv6 access-list
+  tokens:
+  - show
+  - ipv6
+  - access-list
+  abbreviations:
+  - sho ipv acc
+  mode: exec
+  description: 'Live-discovered switch command from CML: show ipv6 access-list'
+  risk_class: informational
+  is_destructive: false
+  arguments: []
+  examples:
+  - show ipv6 access-list
+  related_commands: []
+- id: live_show_ipv6_cef
+  full_command: show ipv6 cef
+  tokens:
+  - show
+  - ipv6
+  - cef
+  abbreviations:
+  - sho ipv cef
+  mode: exec
+  description: 'Live-discovered switch command from CML: show ipv6 cef'
+  risk_class: informational
+  is_destructive: false
+  arguments: []
+  examples:
+  - show ipv6 cef
+  related_commands: []
+- id: live_show_ipv6_destination_guard
+  full_command: show ipv6 destination-guard
+  tokens:
+  - show
+  - ipv6
+  - destination-guard
+  abbreviations:
+  - sho ipv des
+  mode: exec
+  description: 'Live-discovered switch command from CML: show ipv6 destination-guard'
+  risk_class: informational
+  is_destructive: false
+  arguments: []
+  examples:
+  - show ipv6 destination-guard
+  related_commands: []
+- id: live_show_ipv6_dhcp
+  full_command: show ipv6 dhcp
+  tokens:
+  - show
+  - ipv6
+  - dhcp
+  abbreviations:
+  - sho ipv dhc
+  mode: exec
+  description: 'Live-discovered switch command from CML: show ipv6 dhcp'
+  risk_class: informational
+  is_destructive: false
+  arguments: []
+  examples:
+  - show ipv6 dhcp
+  related_commands: []
+- id: live_show_ipv6_eigrp
+  full_command: show ipv6 eigrp
+  tokens:
+  - show
+  - ipv6
+  - eigrp
+  abbreviations:
+  - sho ipv eig
+  mode: exec
+  description: 'Live-discovered switch command from CML: show ipv6 eigrp'
+  risk_class: informational
+  is_destructive: false
+  arguments: []
+  examples:
+  - show ipv6 eigrp
+  related_commands: []
+- id: live_show_ipv6_features
+  full_command: show ipv6 features
+  tokens:
+  - show
+  - ipv6
+  - features
+  abbreviations:
+  - sho ipv fea
+  mode: exec
+  description: 'Live-discovered switch command from CML: show ipv6 features'
+  risk_class: informational
+  is_destructive: false
+  arguments: []
+  examples:
+  - show ipv6 features
+  related_commands: []
+- id: live_show_ipv6_general_prefix
+  full_command: show ipv6 general-prefix
+  tokens:
+  - show
+  - ipv6
+  - general-prefix
+  abbreviations:
+  - sho ipv gen
+  mode: exec
+  description: 'Live-discovered switch command from CML: show ipv6 general-prefix'
+  risk_class: informational
+  is_destructive: false
+  arguments: []
+  examples:
+  - show ipv6 general-prefix
+  related_commands: []
+- id: live_show_ipv6_interface
+  full_command: show ipv6 interface
+  tokens:
+  - show
+  - ipv6
+  - interface
+  abbreviations:
+  - sho ipv int
+  mode: exec
+  description: 'Live-discovered switch command from CML: show ipv6 interface'
+  risk_class: informational
+  is_destructive: false
+  arguments: []
+  examples:
+  - show ipv6 interface
+  related_commands: []
+- id: live_show_ipv6_lisp
+  full_command: show ipv6 lisp
+  tokens:
+  - show
+  - ipv6
+  - lisp
+  abbreviations:
+  - sho ipv lis
+  mode: exec
+  description: 'Live-discovered switch command from CML: show ipv6 lisp'
+  risk_class: informational
+  is_destructive: false
+  arguments: []
+  examples:
+  - show ipv6 lisp
+  related_commands: []
+- id: live_show_ipv6_local
+  full_command: show ipv6 local
+  tokens:
+  - show
+  - ipv6
+  - local
+  abbreviations:
+  - sho ipv loc
+  mode: exec
+  description: 'Live-discovered switch command from CML: show ipv6 local'
+  risk_class: informational
+  is_destructive: false
+  arguments: []
+  examples:
+  - show ipv6 local
+  related_commands: []
+- id: live_show_ipv6_mfib
+  full_command: show ipv6 mfib
+  tokens:
+  - show
+  - ipv6
+  - mfib
+  abbreviations:
+  - sho ipv mfi
+  mode: exec
+  description: 'Live-discovered switch command from CML: show ipv6 mfib'
+  risk_class: informational
+  is_destructive: false
+  arguments: []
+  examples:
+  - show ipv6 mfib
+  related_commands: []
+- id: live_show_ipv6_mld
+  full_command: show ipv6 mld
+  tokens:
+  - show
+  - ipv6
+  - mld
+  abbreviations:
+  - sho ipv mld
+  mode: exec
+  description: 'Live-discovered switch command from CML: show ipv6 mld'
+  risk_class: informational
+  is_destructive: false
+  arguments: []
+  examples:
+  - show ipv6 mld
+  related_commands: []
+- id: live_show_ipv6_mrib
+  full_command: show ipv6 mrib
+  tokens:
+  - show
+  - ipv6
+  - mrib
+  abbreviations:
+  - sho ipv mri
+  mode: exec
+  description: 'Live-discovered switch command from CML: show ipv6 mrib'
+  risk_class: informational
+  is_destructive: false
+  arguments: []
+  examples:
+  - show ipv6 mrib
+  related_commands: []
+- id: live_show_ipv6_mroute
+  full_command: show ipv6 mroute
+  tokens:
+  - show
+  - ipv6
+  - mroute
+  abbreviations:
+  - sho ipv mro
+  mode: exec
+  description: 'Live-discovered switch command from CML: show ipv6 mroute'
+  risk_class: informational
+  is_destructive: false
+  arguments: []
+  examples:
+  - show ipv6 mroute
+  related_commands: []
+- id: live_show_ipv6_mtu
+  full_command: show ipv6 mtu
+  tokens:
+  - show
+  - ipv6
+  - mtu
+  abbreviations:
+  - sho ipv mtu
+  mode: exec
+  description: 'Live-discovered switch command from CML: show ipv6 mtu'
+  risk_class: informational
+  is_destructive: false
+  arguments: []
+  examples:
+  - show ipv6 mtu
+  related_commands: []
+- id: live_show_ipv6_neighbors
+  full_command: show ipv6 neighbors
+  tokens:
+  - show
+  - ipv6
+  - neighbors
+  abbreviations:
+  - sho ipv nei
+  mode: exec
+  description: 'Live-discovered switch command from CML: show ipv6 neighbors'
+  risk_class: informational
+  is_destructive: false
+  arguments: []
+  examples:
+  - show ipv6 neighbors
+  related_commands: []
+- id: live_show_ipv6_ospf
+  full_command: show ipv6 ospf
+  tokens:
+  - show
+  - ipv6
+  - ospf
+  abbreviations:
+  - sho ipv osp
+  mode: exec
+  description: 'Live-discovered switch command from CML: show ipv6 ospf'
+  risk_class: informational
+  is_destructive: false
+  arguments: []
+  examples:
+  - show ipv6 ospf
+  related_commands: []
+- id: live_show_ipv6_pim
+  full_command: show ipv6 pim
+  tokens:
+  - show
+  - ipv6
+  - pim
+  abbreviations:
+  - sho ipv pim
+  mode: exec
+  description: 'Live-discovered switch command from CML: show ipv6 pim'
+  risk_class: informational
+  is_destructive: false
+  arguments: []
+  examples:
+  - show ipv6 pim
+  related_commands: []
+- id: live_show_ipv6_policy
+  full_command: show ipv6 policy
+  tokens:
+  - show
+  - ipv6
+  - policy
+  abbreviations:
+  - sho ipv pol
+  mode: exec
+  description: 'Live-discovered switch command from CML: show ipv6 policy'
+  risk_class: informational
+  is_destructive: false
+  arguments: []
+  examples:
+  - show ipv6 policy
+  related_commands: []
+- id: live_show_ipv6_prefix_list
+  full_command: show ipv6 prefix-list
+  tokens:
+  - show
+  - ipv6
+  - prefix-list
+  abbreviations:
+  - sho ipv pre
+  mode: exec
+  description: 'Live-discovered switch command from CML: show ipv6 prefix-list'
+  risk_class: informational
+  is_destructive: false
+  arguments: []
+  examples:
+  - show ipv6 prefix-list
+  related_commands: []
+- id: live_show_ipv6_protocols
+  full_command: show ipv6 protocols
+  tokens:
+  - show
+  - ipv6
+  - protocols
+  abbreviations:
+  - sho ipv pro
+  mode: exec
+  description: 'Live-discovered switch command from CML: show ipv6 protocols'
+  risk_class: informational
+  is_destructive: false
+  arguments: []
+  examples:
+  - show ipv6 protocols
+  related_commands: []
+- id: live_show_ipv6_rip
+  full_command: show ipv6 rip
+  tokens:
+  - show
+  - ipv6
+  - rip
+  abbreviations:
+  - sho ipv rip
+  mode: exec
+  description: 'Live-discovered switch command from CML: show ipv6 rip'
+  risk_class: informational
+  is_destructive: false
+  arguments: []
+  examples:
+  - show ipv6 rip
+  related_commands: []
+- id: live_show_ipv6_route
+  full_command: show ipv6 route
+  tokens:
+  - show
+  - ipv6
+  - route
+  abbreviations:
+  - sho ipv rou
+  mode: exec
+  description: 'Live-discovered switch command from CML: show ipv6 route'
+  risk_class: informational
+  is_destructive: false
+  arguments: []
+  examples:
+  - show ipv6 route
+  related_commands: []
+- id: live_show_ipv6_routers
+  full_command: show ipv6 routers
+  tokens:
+  - show
+  - ipv6
+  - routers
+  abbreviations:
+  - sho ipv rou
+  mode: exec
+  description: 'Live-discovered switch command from CML: show ipv6 routers'
+  risk_class: informational
+  is_destructive: false
+  arguments: []
+  examples:
+  - show ipv6 routers
+  related_commands: []
+- id: live_show_ipv6_rpf
+  full_command: show ipv6 rpf
+  tokens:
+  - show
+  - ipv6
+  - rpf
+  abbreviations:
+  - sho ipv rpf
+  mode: exec
+  description: 'Live-discovered switch command from CML: show ipv6 rpf'
+  risk_class: informational
+  is_destructive: false
+  arguments: []
+  examples:
+  - show ipv6 rpf
+  related_commands: []
+- id: live_show_lldp
+  full_command: show lldp
+  tokens:
+  - show
+  - lldp
+  abbreviations:
+  - sho lld
+  mode: exec
+  description: 'Live-discovered switch command from CML: show lldp'
+  risk_class: informational
+  is_destructive: false
+  arguments: []
+  examples:
+  - show lldp
+  related_commands: []
+- id: live_show_lldp_entry
+  full_command: show lldp entry
+  tokens:
+  - show
+  - lldp
+  - entry
+  abbreviations:
+  - sho lld ent
+  mode: exec
+  description: 'Live-discovered switch command from CML: show lldp entry'
+  risk_class: informational
+  is_destructive: false
+  arguments: []
+  examples:
+  - show lldp entry
+  related_commands: []
+- id: live_show_lldp_errors
+  full_command: show lldp errors
+  tokens:
+  - show
+  - lldp
+  - errors
+  abbreviations:
+  - sho lld err
+  mode: exec
+  description: 'Live-discovered switch command from CML: show lldp errors'
+  risk_class: informational
+  is_destructive: false
+  arguments: []
+  examples:
+  - show lldp errors
+  related_commands: []
+- id: live_show_lldp_interface
+  full_command: show lldp interface
+  tokens:
+  - show
+  - lldp
+  - interface
+  abbreviations:
+  - sho lld int
+  mode: exec
+  description: 'Live-discovered switch command from CML: show lldp interface'
+  risk_class: informational
+  is_destructive: false
+  arguments: []
+  examples:
+  - show lldp interface
+  related_commands: []
+- id: live_show_lldp_neighbors
+  full_command: show lldp neighbors
+  tokens:
+  - show
+  - lldp
+  - neighbors
+  abbreviations:
+  - sho lld nei
+  mode: exec
+  description: 'Live-discovered switch command from CML: show lldp neighbors'
+  risk_class: informational
+  is_destructive: false
+  arguments: []
+  examples:
+  - show lldp neighbors
+  related_commands: []
+- id: live_show_lldp_traffic
+  full_command: show lldp traffic
+  tokens:
+  - show
+  - lldp
+  - traffic
+  abbreviations:
+  - sho lld tra
+  mode: exec
+  description: 'Live-discovered switch command from CML: show lldp traffic'
+  risk_class: informational
+  is_destructive: false
+  arguments: []
+  examples:
+  - show lldp traffic
+  related_commands: []
+- id: live_show_mac
+  full_command: show mac
+  tokens:
+  - show
+  - mac
+  abbreviations:
+  - sho mac
+  mode: exec
+  description: 'Live-discovered switch command from CML: show mac'
+  risk_class: informational
+  is_destructive: false
+  arguments: []
+  examples:
+  - show mac
+  related_commands: []
+- id: live_show_mac_access_group
+  full_command: show mac access-group
+  tokens:
+  - show
+  - mac
+  - access-group
+  abbreviations:
+  - sho mac acc
+  mode: exec
+  description: 'Live-discovered switch command from CML: show mac access-group'
+  risk_class: informational
+  is_destructive: false
+  arguments: []
+  examples:
+  - show mac access-group
+  related_commands: []
+- id: live_show_mac_address_table
+  full_command: show mac address-table
+  tokens:
+  - show
+  - mac
+  - address-table
+  abbreviations:
+  - sho mac add
+  mode: exec
+  description: 'Live-discovered switch command from CML: show mac address-table'
+  risk_class: informational
+  is_destructive: false
+  arguments: []
+  examples:
+  - show mac address-table
+  related_commands: []
+- id: live_show_version
+  full_command: show version
+  tokens:
+  - show
+  - version
+  abbreviations:
+  - sho ver
+  mode: exec
+  description: 'Live-discovered switch command from CML: show version'
+  risk_class: informational
+  is_destructive: false
+  arguments: []
+  examples:
+  - show version
+  related_commands: []
+- id: live_show_version_a
+  full_command: show version A
+  tokens:
+  - show
+  - version
+  - A
+  abbreviations:
+  - sho ver A
+  mode: exec
+  description: 'Live-discovered switch command from CML: show version A'
+  risk_class: informational
+  is_destructive: false
+  arguments: []
+  examples:
+  - show version A
+  related_commands: []
+- id: live_show_version_cisco
+  full_command: show version Cisco
+  tokens:
+  - show
+  - version
+  - Cisco
+  abbreviations:
+  - sho ver Cis
+  mode: exec
+  description: 'Live-discovered switch command from CML: show version Cisco'
+  risk_class: informational
+  is_destructive: false
+  arguments: []
+  examples:
+  - show version Cisco
+  related_commands: []
+- id: live_show_version_compiled
+  full_command: show version Compiled
+  tokens:
+  - show
+  - version
+  - Compiled
+  abbreviations:
+  - sho ver Com
+  mode: exec
+  description: 'Live-discovered switch command from CML: show version Compiled'
+  risk_class: informational
+  is_destructive: false
+  arguments: []
+  examples:
+  - show version Compiled
+  related_commands: []
+- id: live_show_version_configuration
+  full_command: show version Configuration
+  tokens:
+  - show
+  - version
+  - Configuration
+  abbreviations:
+  - sho ver Con
+  mode: exec
+  description: 'Live-discovered switch command from CML: show version Configuration'
+  risk_class: informational
+  is_destructive: false
+  arguments: []
+  examples:
+  - show version Configuration
+  related_commands: []
+- id: live_show_version_copyright
+  full_command: show version Copyright
+  tokens:
+  - show
+  - version
+  - Copyright
+  abbreviations:
+  - sho ver Cop
+  mode: exec
+  description: 'Live-discovered switch command from CML: show version Copyright'
+  risk_class: informational
+  is_destructive: false
+  arguments: []
+  examples:
+  - show version Copyright
+  related_commands: []
+- id: live_show_version_dram
+  full_command: show version DRAM
+  tokens:
+  - show
+  - version
+  - DRAM
+  abbreviations:
+  - sho ver DRA
+  mode: exec
+  description: 'Live-discovered switch command from CML: show version DRAM'
+  risk_class: informational
+  is_destructive: false
+  arguments: []
+  examples:
+  - show version DRAM
+  related_commands: []
+- id: live_show_version_if
+  full_command: show version If
+  tokens:
+  - show
+  - version
+  - If
+  abbreviations:
+  - sho ver If
+  mode: exec
+  description: 'Live-discovered switch command from CML: show version If'
+  risk_class: informational
+  is_destructive: false
+  arguments: []
+  examples:
+  - show version If
+  related_commands: []
+- id: live_show_version_last
+  full_command: show version Last
+  tokens:
+  - show
+  - version
+  - Last
+  abbreviations:
+  - sho ver Las
+  mode: exec
+  description: 'Live-discovered switch command from CML: show version Last'
+  risk_class: informational
+  is_destructive: false
+  arguments: []
+  examples:
+  - show version Last
+  related_commands: []
+- id: live_show_version_processor
+  full_command: show version Processor
+  tokens:
+  - show
+  - version
+  - Processor
+  abbreviations:
+  - sho ver Pro
+  mode: exec
+  description: 'Live-discovered switch command from CML: show version Processor'
+  risk_class: informational
+  is_destructive: false
+  arguments: []
+  examples:
+  - show version Processor
+  related_commands: []
+- id: live_show_version_states
+  full_command: show version States
+  tokens:
+  - show
+  - version
+  - States
+  abbreviations:
+  - sho ver Sta
+  mode: exec
+  description: 'Live-discovered switch command from CML: show version States'
+  risk_class: informational
+  is_destructive: false
+  arguments: []
+  examples:
+  - show version States
+  related_commands: []
+- id: live_show_version_system
+  full_command: show version System
+  tokens:
+  - show
+  - version
+  - System
+  abbreviations:
+  - sho ver Sys
+  mode: exec
+  description: 'Live-discovered switch command from CML: show version System'
+  risk_class: informational
+  is_destructive: false
+  arguments: []
+  examples:
+  - show version System
+  related_commands: []
+- id: live_show_version_this
+  full_command: show version This
+  tokens:
+  - show
+  - version
+  - This
+  abbreviations:
+  - sho ver Thi
+  mode: exec
+  description: 'Live-discovered switch command from CML: show version This'
+  risk_class: informational
+  is_destructive: false
+  arguments: []
+  examples:
+  - show version This
+  related_commands: []
+- id: live_show_version_agree
+  full_command: show version agree
+  tokens:
+  - show
+  - version
+  - agree
+  abbreviations:
+  - sho ver agr
+  mode: exec
+  description: 'Live-discovered switch command from CML: show version agree'
+  risk_class: informational
+  is_destructive: false
+  arguments: []
+  examples:
+  - show version agree
+  related_commands: []
+- id: live_show_version_compliance
+  full_command: show version compliance
+  tokens:
+  - show
+  - version
+  - compliance
+  abbreviations:
+  - sho ver com
+  mode: exec
+  description: 'Live-discovered switch command from CML: show version compliance'
+  risk_class: informational
+  is_destructive: false
+  arguments: []
+  examples:
+  - show version compliance
+  related_commands: []
+- id: live_show_version_switch
+  full_command: show version switch
+  tokens:
+  - show
+  - version
+  - switch
+  abbreviations:
+  - sho ver swi
+  mode: exec
+  description: 'Live-discovered switch command from CML: show version switch'
+  risk_class: informational
+  is_destructive: false
+  arguments: []
+  examples:
+  - show version switch
+  related_commands: []
+- id: live_show_version_third_party
+  full_command: show version third-party
+  tokens:
+  - show
+  - version
+  - third-party
+  abbreviations:
+  - sho ver thi
+  mode: exec
+  description: 'Live-discovered switch command from CML: show version third-party'
+  risk_class: informational
+  is_destructive: false
+  arguments: []
+  examples:
+  - show version third-party
+  related_commands: []
+- id: live_show_version_to
+  full_command: show version to
+  tokens:
+  - show
+  - version
+  - to
+  abbreviations:
+  - sho ver to
+  mode: exec
+  description: 'Live-discovered switch command from CML: show version to'
+  risk_class: informational
+  is_destructive: false
+  arguments: []
+  examples:
+  - show version to
+  related_commands: []
+- id: live_show_vlan
+  full_command: show vlan
+  tokens:
+  - show
+  - vlan
+  abbreviations:
+  - sho vla
+  mode: exec
+  description: 'Live-discovered switch command from CML: show vlan'
+  risk_class: informational
+  is_destructive: false
+  arguments: []
+  examples:
+  - show vlan
+  related_commands: []
+- id: live_show_vlan_primary
+  full_command: show vlan Primary
+  tokens:
+  - show
+  - vlan
+  - Primary
+  abbreviations:
+  - sho vla Pri
+  mode: exec
+  description: 'Live-discovered switch command from CML: show vlan Primary'
+  risk_class: informational
+  is_destructive: false
+  arguments: []
+  examples:
+  - show vlan Primary
+  related_commands: []
+- id: live_show_vlan_remote
+  full_command: show vlan Remote
+  tokens:
+  - show
+  - vlan
+  - Remote
+  abbreviations:
+  - sho vla Rem
+  mode: exec
+  description: 'Live-discovered switch command from CML: show vlan Remote'
+  risk_class: informational
+  is_destructive: false
+  arguments: []
+  examples:
+  - show vlan Remote
+  related_commands: []
+- id: live_show_vlan_vlan
+  full_command: show vlan VLAN
+  tokens:
+  - show
+  - vlan
+  - VLAN
+  abbreviations:
+  - sho vla VLA
+  mode: exec
+  description: 'Live-discovered switch command from CML: show vlan VLAN'
+  risk_class: informational
+  is_destructive: false
+  arguments: []
+  examples:
+  - show vlan VLAN
+  related_commands: []
+- id: live_show_vlan_brief
+  full_command: show vlan brief
+  tokens:
+  - show
+  - vlan
+  - brief
+  abbreviations:
+  - sho vla bri
+  mode: exec
+  description: 'Live-discovered switch command from CML: show vlan brief'
+  risk_class: informational
+  is_destructive: false
+  arguments: []
+  examples:
+  - show vlan brief
+  related_commands: []
+- id: live_show_vlan_dot1q
+  full_command: show vlan dot1q
+  tokens:
+  - show
+  - vlan
+  - dot1q
+  abbreviations:
+  - sho vla dot
+  mode: exec
+  description: 'Live-discovered switch command from CML: show vlan dot1q'
+  risk_class: informational
+  is_destructive: false
+  arguments: []
+  examples:
+  - show vlan dot1q
+  related_commands: []
+- id: live_show_vlan_id
+  full_command: show vlan id
+  tokens:
+  - show
+  - vlan
+  - id
+  abbreviations:
+  - sho vla id
+  mode: exec
+  description: 'Live-discovered switch command from CML: show vlan id'
+  risk_class: informational
+  is_destructive: false
+  arguments: []
+  examples:
+  - show vlan id
+  related_commands: []
+- id: live_show_vlan_ifindex
+  full_command: show vlan ifindex
+  tokens:
+  - show
+  - vlan
+  - ifindex
+  abbreviations:
+  - sho vla ifi
+  mode: exec
+  description: 'Live-discovered switch command from CML: show vlan ifindex'
+  risk_class: informational
+  is_destructive: false
+  arguments: []
+  examples:
+  - show vlan ifindex
+  related_commands: []
+- id: live_show_vlan_internal
+  full_command: show vlan internal
+  tokens:
+  - show
+  - vlan
+  - internal
+  abbreviations:
+  - sho vla int
+  mode: exec
+  description: 'Live-discovered switch command from CML: show vlan internal'
+  risk_class: informational
+  is_destructive: false
+  arguments: []
+  examples:
+  - show vlan internal
+  related_commands: []
+- id: live_show_vlan_mtu
+  full_command: show vlan mtu
+  tokens:
+  - show
+  - vlan
+  - mtu
+  abbreviations:
+  - sho vla mtu
+  mode: exec
+  description: 'Live-discovered switch command from CML: show vlan mtu'
+  risk_class: informational
+  is_destructive: false
+  arguments: []
+  examples:
+  - show vlan mtu
+  related_commands: []
+- id: live_show_vlan_name
+  full_command: show vlan name
+  tokens:
+  - show
+  - vlan
+  - name
+  abbreviations:
+  - sho vla nam
+  mode: exec
+  description: 'Live-discovered switch command from CML: show vlan name'
+  risk_class: informational
+  is_destructive: false
+  arguments: []
+  examples:
+  - show vlan name
+  related_commands: []
+- id: live_show_vlan_private_vlan
+  full_command: show vlan private-vlan
+  tokens:
+  - show
+  - vlan
+  - private-vlan
+  abbreviations:
+  - sho vla pri
+  mode: exec
+  description: 'Live-discovered switch command from CML: show vlan private-vlan'
+  risk_class: informational
+  is_destructive: false
+  arguments: []
+  examples:
+  - show vlan private-vlan
+  related_commands: []
+- id: live_show_vlan_remote_span
+  full_command: show vlan remote-span
+  tokens:
+  - show
+  - vlan
+  - remote-span
+  abbreviations:
+  - sho vla rem
+  mode: exec
+  description: 'Live-discovered switch command from CML: show vlan remote-span'
+  risk_class: informational
+  is_destructive: false
+  arguments: []
+  examples:
+  - show vlan remote-span
+  related_commands: []
+- id: live_show_vlan_summary
+  full_command: show vlan summary
+  tokens:
+  - show
+  - vlan
+  - summary
+  abbreviations:
+  - sho vla sum
+  mode: exec
+  description: 'Live-discovered switch command from CML: show vlan summary'
+  risk_class: informational
+  is_destructive: false
+  arguments: []
+  examples:
+  - show vlan summary
+  related_commands: []

@@ -1,0 +1,65 @@
+Catalyst 9600 IP Routing Command Reference
+
+Table of Contents
+show ip route .......................................... 12
+show ip interface brief ................................ 18
+clear ip route ......................................... 24
+
+Chapter 1
+
+show ip route
+To display the current state of the routing table, use the show ip route command in privileged EXEC mode.
+
+show ip route [vrf vrf-name] [ip-address [mask]]
+
+Syntax Description
+vrf vrf-name    (Optional) Displays routing information for the specified VRF.
+ip-address      (Optional) Address about which routing information is displayed.
+
+Command Modes
+Privileged EXEC (#)
+
+Command History
+Release 17.3   This command was introduced.
+
+Usage Guidelines
+Use this command to verify routes learned via dynamic routing protocols.
+
+Catalyst 9600 IP Routing Command Reference
+12
+
+show ip interface brief
+To display a brief summary of an interface's IP information and status, use the show ip interface brief command in privileged EXEC mode.
+
+show ip interface brief [type number]
+
+Command Modes
+Privileged EXEC (#)
+
+Catalyst 9600 IP Routing Command Reference
+18
+
+clear ip route
+To clear one or more routes from the IP routing table, use the clear ip route command in privileged EXEC mode.
+
+clear ip route {* | network [mask]}
+
+Command Modes
+Privileged EXEC (#)
+
+Catalyst 9600 IP Routing Command Reference
+24
+
+ip routing
+
+Command Modes
+Global configuration (config)
+
+Catalyst 9600 IP Routing Command Reference
+30
+
+show ip route
+To display the current state of the routing table, use the show ip route command in privileged EXEC mode.
+
+Command Modes
+Privileged EXEC (#)

@@ -1,0 +1,41 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: light;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  font-family: 'Space Grotesk', ui-sans-serif, system-ui;
+  color: #0f172a;
+  background: #ffffff;
+}
+
+#root {
+  min-height: 100vh;
+}
+
+/* Do NOT override the xterm row font here. xterm measures cell geometry using
+   the fontFamily passed to the Terminal constructor; overriding the rendered
+   font to a different family causes a measure-vs-render mismatch that clips the
+   first column of every line. Keep the rendered font identical to the measured
+   one by leaving this to the Terminal config. */
+
+.glass {
+  background: rgba(255, 255, 255, 0.82);
+  border: 1px solid rgba(125, 211, 252, 0.28);
+  backdrop-filter: blur(8px);
+}
+
+.status-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 9999px;
+}

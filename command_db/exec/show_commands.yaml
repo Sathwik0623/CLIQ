@@ -1,0 +1,343 @@
+commands:
+  - id: "show_version"
+    full_command: "show version"
+    tokens: ["show", "version"]
+    abbreviations: ["sh ver", "show ver", "sh version"]
+    mode: "exec"
+    description: "Displays system hardware, software version, and uptime"
+    risk_class: "informational"
+    is_destructive: false
+    arguments: []
+    examples:
+      - "show version"
+    related_commands: ["show inventory", "show running-config"]
+
+  - id: "show_ip_interface_brief"
+    full_command: "show ip interface brief"
+    tokens: ["show", "ip", "interface", "brief"]
+    abbreviations: ["sh ip int br", "sh ip int brief", "show ip int br"]
+    mode: "exec"
+    description: "Displays a brief summary of IP interface status and configuration"
+    risk_class: "informational"
+    is_destructive: false
+    arguments: []
+    examples:
+      - "show ip interface brief"
+      - "show ip interface brief | include up"
+    related_commands: ["show interfaces", "show ip route"]
+
+  - id: "show_ip_route"
+    full_command: "show ip route"
+    tokens: ["show", "ip", "route"]
+    abbreviations: ["sh ip ro", "sh ip route"]
+    mode: "exec"
+    description: "Displays the IP routing table"
+    risk_class: "informational"
+    is_destructive: false
+    arguments:
+      - name: "address"
+        type: "ipv4_address"
+        required: false
+        position: 3
+    examples:
+      - "show ip route"
+      - "show ip route 10.0.0.0"
+    related_commands: ["show ip protocols", "show ip cef"]
+
+  - id: "ping"
+    full_command: "ping"
+    tokens: ["ping"]
+    abbreviations: []
+    mode: "exec"
+    description: "Sends ICMP echo requests to test reachability"
+    risk_class: "informational"
+    is_destructive: false
+    arguments:
+      - name: "destination"
+        type: "hostname_or_ip"
+        required: true
+        position: 1
+    examples:
+      - "ping 8.8.8.8"
+      - "ping 192.168.1.1"
+    related_commands: ["traceroute"]
+
+  - id: "show_running_config"
+    full_command: "show running-config"
+    tokens: ["show", "running-config"]
+    abbreviations: ["sh run", "sh running", "sh running-config", "show run", "show running"]
+    mode: "enable"
+    description: "Displays the active configuration running in memory"
+    risk_class: "informational"
+    is_destructive: false
+    arguments: []
+    examples:
+      - "show running-config"
+      - "show running-config | include interface"
+    related_commands: ["show startup-config", "copy running-config startup-config"]
+
+  - id: "enable"
+    full_command: "enable"
+    tokens: ["enable"]
+    abbreviations: ["en", "ena", "enab"]
+    mode: "exec"
+    description: "Enters privileged EXEC mode"
+    risk_class: "informational"
+    is_destructive: false
+    arguments: []
+    examples:
+      - "enable"
+    related_commands: ["disable", "configure terminal"]
+
+  - id: "disable"
+    full_command: "disable"
+    tokens: ["disable"]
+    abbreviations: ["disa"]
+    mode: "enable"
+    description: "Exits to user EXEC mode"
+    risk_class: "informational"
+    is_destructive: false
+    arguments: []
+    examples:
+      - "disable"
+    related_commands: ["enable"]
+
+  - id: "show_interfaces"
+    full_command: "show interfaces"
+    tokens: ["show", "interfaces"]
+    abbreviations: ["sh int", "show int"]
+    mode: "exec"
+    description: "Displays detailed interface statistics and status"
+    risk_class: "informational"
+    is_destructive: false
+    arguments:
+      - name: "interface"
+        type: "interface_name"
+        required: false
+        position: 2
+    examples:
+      - "show interfaces"
+      - "show interfaces GigabitEthernet0/0"
+    related_commands: ["show ip interface brief"]
+
+  - id: "show_cdp_neighbors"
+    full_command: "show cdp neighbors"
+    tokens: ["show", "cdp", "neighbors"]
+    abbreviations: ["sh cdp nei", "sh cdp neighbors", "show cdp nei"]
+    mode: "exec"
+    description: "Displays directly connected CDP neighbors"
+    risk_class: "informational"
+    is_destructive: false
+    arguments: []
+    examples:
+      - "show cdp neighbors"
+      - "show cdp neighbors detail"
+    related_commands: ["show lldp neighbors"]
+
+  - id: "show_arp"
+    full_command: "show arp"
+    tokens: ["show", "arp"]
+    abbreviations: ["sh arp"]
+    mode: "exec"
+    description: "Displays the ARP table"
+    risk_class: "informational"
+    is_destructive: false
+    arguments: []
+    examples:
+      - "show arp"
+    related_commands: ["show ip arp", "show mac address-table"]
+
+  - id: "show_mac_address_table"
+    full_command: "show mac address-table"
+    tokens: ["show", "mac", "address-table"]
+    abbreviations: ["sh mac add"]
+    mode: "exec"
+    description: "Displays the MAC address forwarding table"
+    risk_class: "informational"
+    is_destructive: false
+    arguments: []
+    examples:
+      - "show mac address-table"
+    related_commands: ["show arp"]
+
+  - id: "show_vlan_brief"
+    full_command: "show vlan brief"
+    tokens: ["show", "vlan", "brief"]
+    abbreviations: ["sh vlan br", "show vlan br"]
+    mode: "exec"
+    description: "Displays a brief summary of configured VLANs (Layer 2 switch only)"
+    risk_class: "informational"
+    is_destructive: false
+    platforms: ["iosvl2", "nxosv", "nxosv9000"]
+    arguments: []
+    examples:
+      - "show vlan brief"
+    related_commands: ["show interfaces trunk"]
+
+  - id: "show_vlan"
+    full_command: "show vlan"
+    tokens: ["show", "vlan"]
+    abbreviations: ["sh vlan"]
+    mode: "exec"
+    description: "Displays VLAN information (Layer 2 switch only)"
+    risk_class: "informational"
+    is_destructive: false
+    platforms: ["iosvl2", "nxosv", "nxosv9000"]
+    arguments: []
+    examples:
+      - "show vlan"
+    related_commands: ["show vlan brief", "show interfaces trunk"]
+
+  - id: "show_ip_protocols"
+    full_command: "show ip protocols"
+    tokens: ["show", "ip", "protocols"]
+    abbreviations: ["sh ip prot", "show ip prot"]
+    mode: "exec"
+    description: "Displays parameters of active IP routing protocols"
+    risk_class: "informational"
+    is_destructive: false
+    arguments: []
+    examples:
+      - "show ip protocols"
+    related_commands: ["show ip route", "show ip ospf"]
+
+  - id: "show_clock"
+    full_command: "show clock"
+    tokens: ["show", "clock"]
+    abbreviations: ["sh clo"]
+    mode: "exec"
+    description: "Displays the current system clock"
+    risk_class: "informational"
+    is_destructive: false
+    arguments: []
+    examples:
+      - "show clock"
+    related_commands: ["show ntp status"]
+
+  - id: "show_users"
+    full_command: "show users"
+    tokens: ["show", "users"]
+    abbreviations: ["sh users"]
+    mode: "exec"
+    description: "Displays information about active terminal lines and connected users"
+    risk_class: "informational"
+    is_destructive: false
+    arguments: []
+    examples:
+      - "show users"
+    related_commands: ["who"]
+
+  - id: "show_startup_config"
+    full_command: "show startup-config"
+    tokens: ["show", "startup-config"]
+    abbreviations: ["sh start", "sh startup", "show start"]
+    mode: "enable"
+    description: "Displays the saved startup configuration in NVRAM"
+    risk_class: "informational"
+    is_destructive: false
+    arguments: []
+    examples:
+      - "show startup-config"
+    related_commands: ["show running-config", "copy running-config startup-config"]
+
+  - id: "show_ip_interface"
+    full_command: "show ip interface"
+    tokens: ["show", "ip", "interface"]
+    abbreviations: ["sh ip int", "show ip int"]
+    mode: "exec"
+    description: "Displays detailed IP-level interface information (helpers, MTU, ACLs)"
+    risk_class: "informational"
+    is_destructive: false
+    arguments:
+      - name: "interface"
+        type: "interface_name"
+        required: false
+        position: 3
+    examples:
+      - "show ip interface GigabitEthernet0/0"
+      - "show ip interface GigabitEthernet0/0 | include Helper"
+    related_commands: ["show ip interface brief", "show interfaces"]
+
+  - id: "show_ip_dhcp_binding"
+    full_command: "show ip dhcp binding"
+    tokens: ["show", "ip", "dhcp", "binding"]
+    abbreviations: ["sh ip dhcp bind"]
+    mode: "exec"
+    description: "Displays current DHCP server lease bindings"
+    risk_class: "informational"
+    is_destructive: false
+    arguments: []
+    examples:
+      - "show ip dhcp binding"
+    related_commands: ["show ip dhcp pool", "show ip dhcp server statistics"]
+
+  - id: "show_ip_dhcp_pool"
+    full_command: "show ip dhcp pool"
+    tokens: ["show", "ip", "dhcp", "pool"]
+    abbreviations: ["sh ip dhcp pool"]
+    mode: "exec"
+    description: "Displays configured DHCP server pools and statistics"
+    risk_class: "informational"
+    is_destructive: false
+    arguments:
+      - name: "pool_name"
+        type: "word"
+        required: false
+        position: 3
+    examples:
+      - "show ip dhcp pool"
+      - "show ip dhcp pool LAN"
+    related_commands: ["show ip dhcp binding", "show ip dhcp server statistics"]
+
+  - id: "show_ip_dhcp_server_statistics"
+    full_command: "show ip dhcp server statistics"
+    tokens: ["show", "ip", "dhcp", "server", "statistics"]
+    abbreviations: ["sh ip dhcp server stat", "sh ip dhcp serv stats"]
+    mode: "exec"
+    description: "Displays DHCP server packet/lease counters"
+    risk_class: "informational"
+    is_destructive: false
+    arguments: []
+    examples:
+      - "show ip dhcp server statistics"
+    related_commands: ["show ip dhcp binding", "show ip dhcp pool"]
+
+  - id: "show_ip_dhcp_conflict"
+    full_command: "show ip dhcp conflict"
+    tokens: ["show", "ip", "dhcp", "conflict"]
+    abbreviations: ["sh ip dhcp conflic", "sh ip dhcp conflict"]
+    mode: "exec"
+    description: "Displays DHCP address conflicts detected by ping/gratuitous ARP"
+    risk_class: "informational"
+    is_destructive: false
+    arguments: []
+    examples:
+      - "show ip dhcp conflict"
+    related_commands: ["show ip dhcp binding", "clear ip dhcp conflict"]
+
+  - id: "show_monitor_capture_buffer"
+    full_command: "show monitor capture"
+    tokens: ["show", "monitor", "capture"]
+    abbreviations: ["sh mon cap"]
+    mode: "enable"
+    description: "Displays Embedded Packet Capture (EPC) buffer contents/state"
+    risk_class: "informational"
+    is_destructive: false
+    arguments:
+      - name: "name"
+        type: "word"
+        required: false
+        position: 3
+      - name: "subcommand"
+        type: "word"
+        required: false
+        position: 4
+      - name: "format"
+        type: "word"
+        required: false
+        position: 5
+    examples:
+      - "show monitor capture"
+      - "show monitor capture DHCP-CAP buffer brief"
+      - "show monitor capture DHCP-CAP buffer detailed"
+    related_commands: ["monitor capture"]

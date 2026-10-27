@@ -1,0 +1,37 @@
+modes:
+  exec:
+    prompt_pattern: '\w+>'
+    enter_command: null
+    parent: null
+  enable:
+    prompt_pattern: '\w+#'
+    enter_command: "enable"
+    parent: "exec"
+  config:
+    prompt_pattern: '\w+\(config\)#'
+    enter_command: "configure terminal"
+    parent: "enable"
+  config-if:
+    prompt_pattern: '\w+\(config-if\)#'
+    enter_command: "interface <interface>"
+    parent: "config"
+  config-subif:
+    prompt_pattern: '\w+\(config-subif\)#'
+    enter_command: "interface <subinterface>"
+    parent: "config"
+  config-router:
+    prompt_pattern: '\w+\(config-router\)#'
+    enter_command: "router <protocol>"
+    parent: "config"
+  config-line:
+    prompt_pattern: '\w+\(config-line\)#'
+    enter_command: "line <type> <number>"
+    parent: "config"
+  config-vlan:
+    prompt_pattern: '\w+\(config-vlan\)#'
+    enter_command: "vlan <vlan_id>"
+    parent: "config"
+  config-ext-nacl:
+    prompt_pattern: '\w+\(config-ext-nacl\)#'
+    enter_command: "ip access-list extended <name>"
+    parent: "config"

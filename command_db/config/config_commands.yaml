@@ -1,0 +1,452 @@
+commands:
+  - id: "configure_terminal"
+    full_command: "configure terminal"
+    tokens: ["configure", "terminal"]
+    abbreviations: ["conf t", "config t", "conf term"]
+    mode: "enable"
+    description: "Enters global configuration mode"
+    risk_class: "configuration"
+    is_destructive: false
+    arguments: []
+    examples:
+      - "configure terminal"
+    related_commands: []
+
+  - id: "interface"
+    full_command: "interface"
+    tokens: ["interface"]
+    abbreviations: ["int"]
+    mode: "config"
+    description: "Enters interface configuration mode for the specified interface"
+    risk_class: "configuration"
+    is_destructive: false
+    arguments:
+      - name: "interface"
+        type: "interface_name"
+        required: true
+        position: 1
+    examples:
+      - "interface GigabitEthernet0/0"
+      - "interface Loopback0"
+    related_commands: ["no shutdown", "ip address"]
+
+  - id: "ip_address"
+    full_command: "ip address"
+    tokens: ["ip", "address"]
+    abbreviations: ["ip add", "ip addr"]
+    mode: "config-if"
+    description: "Sets the IP address and subnet mask on an interface"
+    risk_class: "configuration"
+    is_destructive: false
+    arguments:
+      - name: "address"
+        type: "ipv4_address"
+        required: true
+        position: 2
+      - name: "mask"
+        type: "subnet_mask"
+        required: true
+        position: 3
+    examples:
+      - "ip address 192.168.1.1 255.255.255.0"
+    related_commands: ["no shutdown", "interface"]
+
+  - id: "no_shutdown"
+    full_command: "no shutdown"
+    tokens: ["no", "shutdown"]
+    abbreviations: ["no shut"]
+    mode: "config-if"
+    description: "Enables (brings up) the interface"
+    risk_class: "configuration"
+    is_destructive: false
+    arguments: []
+    examples:
+      - "no shutdown"
+    related_commands: ["shutdown", "ip address"]
+
+  - id: "shutdown"
+    full_command: "shutdown"
+    tokens: ["shutdown"]
+    abbreviations: ["shut"]
+    mode: "config-if"
+    description: "Administratively disables the interface (brings it down)"
+    risk_class: "disruptive"
+    is_destructive: true
+    examples:
+      - "shutdown"
+    related_commands: ["no shutdown"]
+
+  - id: "router_ospf"
+    full_command: "router ospf"
+    tokens: ["router", "ospf"]
+    abbreviations: []
+    mode: "config"
+    description: "Enables OSPF routing process and enters router config mode"
+    risk_class: "configuration"
+    is_destructive: false
+    arguments:
+      - name: "process_id"
+        type: "word"
+        required: true
+        position: 2
+    examples:
+      - "router ospf 1"
+    related_commands: ["network", "no router ospf"]
+
+  - id: "hostname"
+    full_command: "hostname"
+    tokens: ["hostname"]
+    abbreviations: []
+    mode: "config"
+    description: "Sets the device hostname"
+    risk_class: "configuration"
+    is_destructive: false
+    arguments:
+      - name: "name"
+        type: "word"
+        required: true
+        position: 1
+    examples:
+      - "hostname R1"
+    related_commands: []
+
+  - id: "enable_secret"
+    full_command: "enable secret"
+    tokens: ["enable", "secret"]
+    abbreviations: []
+    mode: "config"
+    description: "Sets the encrypted privileged EXEC password"
+    risk_class: "configuration"
+    is_destructive: false
+    arguments:
+      - name: "password"
+        type: "word"
+        required: true
+        position: 2
+    examples:
+      - "enable secret MySecret123"
+    related_commands: ["enable password", "service password-encryption"]
+
+  - id: "ip_route"
+    full_command: "ip route"
+    tokens: ["ip", "route"]
+    abbreviations: []
+    mode: "config"
+    description: "Adds a static route to the routing table"
+    risk_class: "configuration"
+    is_destructive: false
+    arguments:
+      - name: "network"
+        type: "ipv4_address"
+        required: true
+        position: 2
+      - name: "mask"
+        type: "subnet_mask"
+        required: true
+        position: 3
+      - name: "next_hop"
+        type: "hostname_or_ip"
+        required: true
+        position: 4
+    examples:
+      - "ip route 10.0.0.0 255.0.0.0 192.168.1.1"
+    related_commands: ["show ip route"]
+
+  - id: "no_ip_route"
+    full_command: "no ip route"
+    tokens: ["no", "ip", "route"]
+    abbreviations: []
+    mode: "config"
+    description: "Removes a static route"
+    risk_class: "disruptive"
+    is_destructive: true
+    arguments:
+      - name: "network"
+        type: "ipv4_address"
+        required: true
+        position: 3
+      - name: "mask"
+        type: "subnet_mask"
+        required: true
+        position: 4
+      - name: "next_hop"
+        type: "hostname_or_ip"
+        required: true
+        position: 5
+    examples:
+      - "no ip route 10.0.0.0 255.0.0.0 192.168.1.1"
+    related_commands: ["ip route"]
+
+  - id: "ip_domain_name"
+    full_command: "ip domain-name"
+    tokens: ["ip", "domain-name"]
+    abbreviations: []
+    mode: "config"
+    description: "Sets the device's default DNS domain name"
+    risk_class: "configuration"
+    is_destructive: false
+    arguments:
+      - name: "name"
+        type: "word"
+        required: true
+        position: 2
+    examples:
+      - "ip domain-name lab.local"
+    related_commands: ["ip name-server"]
+
+  - id: "ip_name_server"
+    full_command: "ip name-server"
+    tokens: ["ip", "name-server"]
+    abbreviations: []
+    mode: "config"
+    description: "Specifies the address of a DNS name server"
+    risk_class: "configuration"
+    is_destructive: false
+    arguments:
+      - name: "address"
+        type: "ipv4_address"
+        required: true
+        position: 2
+    examples:
+      - "ip name-server 8.8.8.8"
+    related_commands: ["ip domain-name"]
+
+  - id: "line_vty"
+    full_command: "line vty"
+    tokens: ["line", "vty"]
+    abbreviations: []
+    mode: "config"
+    description: "Enters VTY line configuration mode for remote (Telnet/SSH) access"
+    risk_class: "configuration"
+    is_destructive: false
+    arguments:
+      - name: "first"
+        type: "word"
+        required: true
+        position: 2
+      - name: "last"
+        type: "word"
+        required: false
+        position: 3
+    examples:
+      - "line vty 0 4"
+      - "line vty 0 15"
+    related_commands: ["transport input", "password", "login"]
+
+  - id: "line_console"
+    full_command: "line console"
+    tokens: ["line", "console"]
+    abbreviations: ["line con"]
+    mode: "config"
+    description: "Enters console line configuration mode"
+    risk_class: "configuration"
+    is_destructive: false
+    arguments:
+      - name: "number"
+        type: "word"
+        required: true
+        position: 2
+    examples:
+      - "line console 0"
+    related_commands: ["password", "login"]
+
+  - id: "vlan"
+    full_command: "vlan"
+    tokens: ["vlan"]
+    abbreviations: []
+    mode: "config"
+    description: "Creates a VLAN and enters VLAN configuration mode"
+    risk_class: "configuration"
+    is_destructive: false
+    arguments:
+      - name: "vlan_id"
+        type: "vlan_id"
+        required: true
+        position: 1
+    examples:
+      - "vlan 10"
+      - "vlan 100"
+    related_commands: ["name", "show vlan brief"]
+
+  - id: "service_password_encryption"
+    full_command: "service password-encryption"
+    tokens: ["service", "password-encryption"]
+    abbreviations: []
+    mode: "config"
+    description: "Enables encryption of plaintext passwords in the configuration"
+    risk_class: "configuration"
+    is_destructive: false
+    arguments: []
+    examples:
+      - "service password-encryption"
+    related_commands: ["enable secret"]
+
+  - id: "ip_access_list_extended"
+    full_command: "ip access-list extended"
+    tokens: ["ip", "access-list", "extended"]
+    abbreviations: ["ip acc ext", "ip access ext"]
+    mode: "config"
+    description: "Creates a named extended IP access list and enters ACL configuration mode"
+    risk_class: "configuration"
+    is_destructive: false
+    arguments:
+      - name: "name"
+        type: "word"
+        required: true
+        position: 3
+    examples:
+      - "ip access-list extended DHCP-CAP"
+      - "ip access-list extended BLOCK-INBOUND"
+    related_commands: ["permit", "deny", "ip access-list standard"]
+
+  # --- Mode-navigation commands ------------------------------------------
+  # Valid in every config (sub-)mode. The intelligence engine also treats these
+  # as universal passthrough so they are never typo-corrected; the DB entries
+  # give clean ghost-text/prefix matching while typing.
+  - id: "exit"
+    full_command: "exit"
+    tokens: ["exit"]
+    abbreviations: []
+    mode: "config"
+    description: "Exits the current configuration mode (moves up one level)"
+    risk_class: "informational"
+    is_destructive: false
+    arguments: []
+    examples:
+      - "exit"
+    related_commands: ["end"]
+
+  - id: "end"
+    full_command: "end"
+    tokens: ["end"]
+    abbreviations: []
+    mode: "config"
+    description: "Ends configuration mode and returns to privileged EXEC mode"
+    risk_class: "informational"
+    is_destructive: false
+    arguments: []
+    examples:
+      - "end"
+    related_commands: ["exit"]
+
+  - id: "ip_access_list_standard"
+    full_command: "ip access-list standard"
+    tokens: ["ip", "access-list", "standard"]
+    abbreviations: ["ip acc std"]
+    mode: "config"
+    description: "Creates a named standard IP access list and enters ACL configuration mode"
+    risk_class: "configuration"
+    is_destructive: false
+    arguments:
+      - name: "name"
+        type: "word"
+        required: true
+        position: 3
+    examples:
+      - "ip access-list standard MGMT-ACL"
+    related_commands: ["ip access-list extended"]
+
+  - id: "ntp_server"
+    full_command: "ntp server"
+    tokens: ["ntp", "server"]
+    abbreviations: ["ntp ser"]
+    mode: "config"
+    description: "Configures an NTP time server"
+    risk_class: "configuration"
+    is_destructive: false
+    arguments:
+      - name: "address"
+        type: "ipv4_address"
+        required: true
+        position: 2
+    examples:
+      - "ntp server 1.1.1.1"
+      - "ntp server 10.0.0.1"
+    related_commands: ["show ntp status"]
+
+  - id: "logging_host"
+    full_command: "logging host"
+    tokens: ["logging", "host"]
+    abbreviations: ["log host"]
+    mode: "config"
+    description: "Sends syslog messages to a remote logging server"
+    risk_class: "configuration"
+    is_destructive: false
+    arguments:
+      - name: "address"
+        type: "ipv4_address"
+        required: true
+        position: 2
+    examples:
+      - "logging host 10.0.0.5"
+    related_commands: ["logging trap"]
+
+  - id: "ip_default_gateway"
+    full_command: "ip default-gateway"
+    tokens: ["ip", "default-gateway"]
+    abbreviations: ["ip def-gw", "ip default-gw"]
+    mode: "config"
+    description: "Sets the default gateway for the device management plane"
+    risk_class: "configuration"
+    is_destructive: false
+    arguments:
+      - name: "address"
+        type: "ipv4_address"
+        required: true
+        position: 2
+    examples:
+      - "ip default-gateway 192.168.1.1"
+    related_commands: ["ip route"]
+
+  - id: "vtp_mode"
+    full_command: "vtp mode"
+    tokens: ["vtp", "mode"]
+    abbreviations: []
+    mode: "config"
+    description: "Sets the VTP operational mode (server/client/transparent/off)"
+    risk_class: "configuration"
+    is_destructive: false
+    arguments:
+      - name: "mode"
+        type: "vtp_mode"
+        required: true
+        position: 2
+    examples:
+      - "vtp mode server"
+      - "vtp mode client"
+      - "vtp mode transparent"
+    related_commands: ["vtp domain", "show vtp status"]
+
+  - id: "vtp_domain"
+    full_command: "vtp domain"
+    tokens: ["vtp", "domain"]
+    abbreviations: []
+    mode: "config"
+    description: "Sets the VTP administrative domain name"
+    risk_class: "configuration"
+    is_destructive: false
+    arguments:
+      - name: "name"
+        type: "word"
+        required: true
+        position: 2
+    examples:
+      - "vtp domain CORPORATE"
+    related_commands: ["vtp mode", "vtp version"]
+
+  - id: "banner_motd"
+    full_command: "banner motd"
+    tokens: ["banner", "motd"]
+    abbreviations: ["ban motd"]
+    mode: "config"
+    description: "Configures the message-of-the-day login banner"
+    risk_class: "configuration"
+    is_destructive: false
+    arguments:
+      - name: "message"
+        type: "text"
+        required: true
+        position: 2
+    examples:
+      - "banner motd ^Authorized access only^\n"
+    related_commands: []

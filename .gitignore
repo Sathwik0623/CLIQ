@@ -1,0 +1,79 @@
+﻿# Build artifacts
+src/cliq_cli.egg-info/
+build/
+dist/
+*.egg-info/
+
+# Virtual env
+.venv/
+venv/
+
+# Secrets — NEVER commit
+.env
+*.key
+credentials.json
+
+# Built artifacts
+*.sqlite
+*.db
+data/command_db.sqlite
+command_db.sqlite
+data/retrieval_vectors.db
+
+# Local, offline self-learning cache (accepted commands) — never sync
+.cliq/
+
+# Harvested data (large, regenerable)
+data/harvest/ntc_raw/
+data/harvest/*.json
+ntc_harvest.json
+
+# Large reference dumps
+Router commands.txt
+docs/CLI.docx
+
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+.mypy_cache/
+
+# IDE / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Frontend dependencies (never commit node_modules)
+frontend/node_modules/
+node_modules/
+
+# Frontend build artifacts / generated config outputs (regenerable via build)
+frontend/dist/
+*.tsbuildinfo
+frontend/tailwind.config.js
+frontend/tailwind.config.d.ts
+frontend/vite.config.js
+frontend/vite.config.d.ts
+
+# Memory scopes (agent-local)
+.memories/
+
+# Runtime memory stores (Phase 5 — test/runtime databases)
+.cliq/
+kb/*.sqlite
+*_output.txt
+
+# KB source PDFs (large binaries) and generated reports — regenerable / not synced
+kb/sources/
+kb/ingest_report.json
+kb/product_cr_ingest_report.json
+*.pdf
+
+ghp_*
+id_ed25519
+id_ed25519.pub
+*.pub
+
+.vite/
+frontend/.vite/
