@@ -55,7 +55,7 @@ class TestPhaseSStreaming:
             gateway="cml.test.local",
             path="lab1/r1/0",
             username="admin",
-            password="secret_password",
+            password="mock_test_password_001",
         )
         simulated_chunks = [
             b"show ip int brief\r\n",
@@ -97,7 +97,7 @@ class TestPhaseSStreaming:
             gateway="cml.test.local",
             path="lab1/r1/0",
             username="admin",
-            password="secret_password",
+            password="mock_test_password_001",
         )
         simulated_chunks = [
             b"show ip ",
@@ -135,7 +135,7 @@ class TestPhaseSStreaming:
             gateway="cml.test.local",
             path="lab1/r1/0",
             username="admin",
-            password="secret_password",
+            password="mock_test_password_001",
         )
         simulated_chunks = [
             b"\r\n",
@@ -165,7 +165,7 @@ class TestPhaseSStreaming:
             gateway="cml.test.local",
             path="lab1/r1/0",
             username="admin",
-            password="secret_password",
+            password="mock_test_password_001",
         )
         simulated_chunks = [
             b"show running-config\r\n",
@@ -208,7 +208,7 @@ class TestPhaseSPromptDeduplication:
         session = server.AuthSession(
             host="cml.example.com",
             username="cml_user",
-            password="cml_pass",
+            password="TEST_ONLY_CML_PASSWORD",
             connection_type="cml",
         )
         server.SESSIONS[token] = session
@@ -251,7 +251,7 @@ class TestPhaseSPromptDeduplication:
         session = server.AuthSession(
             host="cml.example.com",
             username="cml_user",
-            password="cml_pass",
+            password="TEST_ONLY_CML_PASSWORD",
             connection_type="cml",
         )
         server.SESSIONS[token] = session
@@ -299,7 +299,7 @@ class TestPhaseSPromptDeduplication:
         session = server.AuthSession(
             host="cml.example.com",
             username="cml_user",
-            password="cml_pass",
+            password="TEST_ONLY_CML_PASSWORD",
             connection_type="cml",
         )
         server.SESSIONS[token] = session

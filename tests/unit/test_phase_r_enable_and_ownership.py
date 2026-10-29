@@ -35,7 +35,7 @@ def recv_msg_of_type(ws, msg_type: str, max_msgs: int = 30) -> dict[str, Any]:
 class FakeParamikoChannel:
     """Mock Paramiko channel that mimics an interactive Cisco IOS router console behind CML."""
 
-    def __init__(self, initial_prompt: str = "R1>", enable_secret: str = "router_secret_456"):
+    def __init__(self, initial_prompt: str = "R1>", enable_secret: str = "mock_test_enable_secret_001"):
         self.prompt = initial_prompt
         self.enable_secret = enable_secret
         self.closed = False
@@ -110,10 +110,10 @@ class FakeParamikoChannel:
 class MockCMLConsoleDevice(CMLConsoleDevice):
     """Subclass of CMLConsoleDevice with simulated channel I/O."""
 
-    def __init__(self, initial_prompt: str = "R1>", enable_secret: str = "router_secret_456"):
+    def __init__(self, initial_prompt: str = "R1>", enable_secret: str = "mock_test_enable_secret_001"):
         self.gateway = "cml.example.com"
         self.username = "cml_controller_user"
-        self.password = "cml_controller_pass"
+        self.password = "TEST_ONLY_CML_PASSWORD"
         self.path = "/default-lab/R1/0"
         self.timeout = 5
         self._current_prompt = initial_prompt
@@ -157,11 +157,11 @@ class TestPhaseREnableAndOwnership:
         token = "cml_phase_r_token_1"
         device_id = "r1-device-phase-r-1"
 
-        dev = MockCMLConsoleDevice(initial_prompt="R1>", enable_secret="router_secret_456")
+        dev = MockCMLConsoleDevice(initial_prompt="R1>", enable_secret="mock_test_enable_secret_001")
         session = server.AuthSession(
             host="cml.example.com",
             username="cml_user",
-            password="cml_pass",
+            password="TEST_ONLY_CML_PASSWORD",
             connection_type="cml",
         )
         server.SESSIONS[token] = session
@@ -206,11 +206,11 @@ class TestPhaseREnableAndOwnership:
         token = "cml_phase_r_token_2"
         device_id = "r1-device-phase-r-2"
 
-        dev = MockCMLConsoleDevice(initial_prompt="R1>", enable_secret="router_secret_456")
+        dev = MockCMLConsoleDevice(initial_prompt="R1>", enable_secret="mock_test_enable_secret_001")
         session = server.AuthSession(
             host="cml.example.com",
             username="cml_user",
-            password="cml_pass",
+            password="TEST_ONLY_CML_PASSWORD",
             connection_type="cml",
         )
         server.SESSIONS[token] = session
@@ -235,7 +235,7 @@ class TestPhaseREnableAndOwnership:
                     "type": "auth_credentials",
                     "device_id": device_id,
                     "username": "",
-                    "password": "router_secret_456",
+                    "password": "mock_test_enable_secret_001",
                     "stage_type": "enable",
                 })
 
@@ -261,11 +261,11 @@ class TestPhaseREnableAndOwnership:
         token = "cml_phase_r_token_3"
         device_id = "r1-device-phase-r-3"
 
-        dev = MockCMLConsoleDevice(initial_prompt="R1>", enable_secret="router_secret_456")
+        dev = MockCMLConsoleDevice(initial_prompt="R1>", enable_secret="mock_test_enable_secret_001")
         session = server.AuthSession(
             host="cml.example.com",
             username="cml_user",
-            password="cml_pass",
+            password="TEST_ONLY_CML_PASSWORD",
             connection_type="cml",
         )
         server.SESSIONS[token] = session
@@ -290,7 +290,7 @@ class TestPhaseREnableAndOwnership:
                     "type": "auth_credentials",
                     "device_id": device_id,
                     "username": "",
-                    "password": "router_secret_456",
+                    "password": "mock_test_enable_secret_001",
                 })
 
                 dev_status = recv_msg_of_type(ws, "device_status")
@@ -306,11 +306,11 @@ class TestPhaseREnableAndOwnership:
         token = "cml_phase_r_token_4"
         device_id = "r1-device-phase-r-4"
 
-        dev = MockCMLConsoleDevice(initial_prompt="R1>", enable_secret="correct_secret_xyz")
+        dev = MockCMLConsoleDevice(initial_prompt="R1>", enable_secret="mock_test_enable_secret_001")
         session = server.AuthSession(
             host="cml.example.com",
             username="cml_user",
-            password="cml_pass",
+            password="TEST_ONLY_CML_PASSWORD",
             connection_type="cml",
         )
         server.SESSIONS[token] = session
@@ -335,7 +335,7 @@ class TestPhaseREnableAndOwnership:
                     "type": "auth_credentials",
                     "device_id": device_id,
                     "username": "",
-                    "password": "wrong_password_123",
+                    "password": "mock_test_wrong_password",
                     "stage_type": "enable",
                 })
 
@@ -360,11 +360,11 @@ class TestPhaseREnableAndOwnership:
         token = "cml_phase_r_token_5"
         device_id = "r1-device-phase-r-5"
 
-        dev = MockCMLConsoleDevice(initial_prompt="R1>", enable_secret="correct_secret_xyz")
+        dev = MockCMLConsoleDevice(initial_prompt="R1>", enable_secret="mock_test_enable_secret_001")
         session = server.AuthSession(
             host="cml.example.com",
             username="cml_user",
-            password="cml_pass",
+            password="TEST_ONLY_CML_PASSWORD",
             connection_type="cml",
         )
         server.SESSIONS[token] = session
@@ -418,7 +418,7 @@ class TestPhaseREnableAndOwnership:
         session = server.AuthSession(
             host="cml.example.com",
             username="cml_user",
-            password="cml_pass",
+            password="TEST_ONLY_CML_PASSWORD",
             connection_type="cml",
         )
         server.SESSIONS[token] = session
@@ -449,11 +449,11 @@ class TestPhaseREnableAndOwnership:
         token = "cml_phase_r_token_7"
         device_id = "r1-device-phase-r-7"
 
-        dev = MockCMLConsoleDevice(initial_prompt="R1>", enable_secret="router_secret_456")
+        dev = MockCMLConsoleDevice(initial_prompt="R1>", enable_secret="mock_test_enable_secret_001")
         session = server.AuthSession(
             host="cml.example.com",
             username="cml_user",
-            password="cml_pass",
+            password="TEST_ONLY_CML_PASSWORD",
             connection_type="cml",
         )
         server.SESSIONS[token] = session

@@ -35,7 +35,7 @@ def recv_msg_of_type(ws, msg_type: str, max_msgs: int = 30) -> dict[str, Any]:
 class FakeParamikoChannel:
     """Mock Paramiko channel that mimics an interactive Cisco IOS console behind CML proxy."""
 
-    def __init__(self, initial_prompt: str = "R1>", enable_secret: str = "cisco_enable_123"):
+    def __init__(self, initial_prompt: str = "R1>", enable_secret: str = "mock_test_enable_secret_001"):
         self.prompt = initial_prompt
         self.enable_secret = enable_secret
         self.closed = False
@@ -113,10 +113,10 @@ class FakeParamikoChannel:
 class MockCMLConsoleDevice(CMLConsoleDevice):
     """Subclass of CMLConsoleDevice with simulated channel I/O for unit testing."""
 
-    def __init__(self, initial_prompt: str = "R1>", enable_secret: str = "cisco_enable_123"):
+    def __init__(self, initial_prompt: str = "R1>", enable_secret: str = "mock_test_enable_secret_001"):
         self.gateway = "cml.example.com"
         self.username = "cml_controller_user"
-        self.password = "cml_controller_pass"
+        self.password = "TEST_ONLY_CML_PASSWORD"
         self.path = "/default-lab/R1/0"
         self.timeout = 5
         self._current_prompt = initial_prompt
@@ -167,17 +167,17 @@ class TestPhasePCmlEnableAuth:
 
     def test_cml_console_device_enable_method_success(self):
         """3. Calling enable(secret) sends enable, password, and transitions prompt to '#'."""
-        dev = MockCMLConsoleDevice(initial_prompt="R1>", enable_secret="correct_secret_xyz")
-        result = dev.enable("correct_secret_xyz")
+        dev = MockCMLConsoleDevice(initial_prompt="R1>", enable_secret="mock_test_enable_secret_001")
+        result = dev.enable("mock_test_enable_secret_001")
         assert result is True
         assert dev.current_prompt.endswith("#")
         assert dev.check_enable_mode()
 
     def test_cml_console_device_enable_method_failure_restores_user_exec(self):
         """4. Invalid enable secret raises ConnectionError and restores prompt without crashing."""
-        dev = MockCMLConsoleDevice(initial_prompt="R1>", enable_secret="correct_secret_xyz")
+        dev = MockCMLConsoleDevice(initial_prompt="R1>", enable_secret="mock_test_enable_secret_001")
         with pytest.raises(ConnectionError, match="Enable authentication rejected"):
-            dev.enable("wrong_secret_123")
+            dev.enable("mock_test_wrong_password")
 
         # Must not be left in enable mode
         assert not dev.check_enable_mode()
@@ -188,12 +188,12 @@ class TestPhasePCmlEnableAuth:
         token = "cml_test_token_phase_p"
         device_id = "r1-device-id"
 
-        dev = MockCMLConsoleDevice(initial_prompt="R1>", enable_secret="device_enable_pwd")
+        dev = MockCMLConsoleDevice(initial_prompt="R1>", enable_secret="mock_test_enable_secret_001")
 
         session = server.AuthSession(
             host="cml.example.com",
             username="cml_controller_user",
-            password="cml_controller_pass",
+            password="TEST_ONLY_CML_PASSWORD",
             connection_type="cml",
         )
         server.SESSIONS[token] = session
@@ -238,7 +238,7 @@ class TestPhasePCmlEnableAuth:
                     "type": "auth_credentials",
                     "device_id": device_id,
                     "username": "",
-                    "password": "device_enable_pwd",
+                    "password": "mock_test_enable_secret_001",
                 })
 
                 # Expect successful elevation to privileged EXEC mode
@@ -262,12 +262,12 @@ class TestPhasePCmlEnableAuth:
         token = "cml_test_token_invalid_secret"
         device_id = "r1-device-id-2"
 
-        dev = MockCMLConsoleDevice(initial_prompt="R1>", enable_secret="correct_secret_999")
+        dev = MockCMLConsoleDevice(initial_prompt="R1>", enable_secret="mock_test_enable_secret_001")
 
         session = server.AuthSession(
             host="cml.example.com",
             username="cml_user",
-            password="cml_pass",
+            password="TEST_ONLY_CML_PASSWORD",
             connection_type="cml",
         )
         server.SESSIONS[token] = session
@@ -293,7 +293,7 @@ class TestPhasePCmlEnableAuth:
                     "type": "auth_credentials",
                     "device_id": device_id,
                     "username": "",
-                    "password": "wrong_password_abc",
+                    "password": "mock_test_wrong_password",
                 })
 
                 err_out = recv_msg_of_type(ws, "device_output")
@@ -316,12 +316,12 @@ class TestPhasePCmlEnableAuth:
         token = "cml_test_token_cancel_auth"
         device_id = "r1-device-id-3"
 
-        dev = MockCMLConsoleDevice(initial_prompt="R1>", enable_secret="secret123")
+        dev = MockCMLConsoleDevice(initial_prompt="R1>", enable_secret="mock_test_enable_secret_001")
 
         session = server.AuthSession(
             host="cml.example.com",
             username="cml_user",
-            password="cml_pass",
+            password="TEST_ONLY_CML_PASSWORD",
             connection_type="cml",
         )
         server.SESSIONS[token] = session
@@ -359,8 +359,8 @@ class TestPhasePCmlEnableAuth:
         token = "cml_token_no_auto_sub"
         device_id = "r1-device-id-4"
 
-        cml_controller_pwd = "super_secret_cml_pwd"
-        device_enable_pwd = "different_device_pwd"
+        cml_controller_pwd = "mock_canary_cml_controller_pwd"
+        device_enable_pwd = "mock_test_enable_secret_001"
 
         dev = MockCMLConsoleDevice(initial_prompt="R1>", enable_secret=device_enable_pwd)
         dev.password = cml_controller_pwd

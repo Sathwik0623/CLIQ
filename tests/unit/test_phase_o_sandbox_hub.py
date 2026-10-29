@@ -127,7 +127,7 @@ class TestPhaseOSandboxHub:
                 json={
                     "host": "cml.example.org",
                     "username": "cml_user",
-                    "password": "cml_password_abc",
+                    "password": "TEST_ONLY_CML_PASSWORD",
                 },
             )
             assert resp.status_code == 200
@@ -302,8 +302,8 @@ class TestPhaseOSandboxHub:
             json={
                 "host": "10.10.20.181",
                 "username": "developer",
-                "password": "super_secret_ssh_pw",
-                "secret": "super_secret_enable_sec",
+                "password": "mock_test_password_001",
+                "secret": "mock_test_enable_secret_001",
                 "device_type": "cisco_ios",
                 "method": "direct",
             },
@@ -313,8 +313,8 @@ class TestPhaseOSandboxHub:
 
         # Response must never leak credentials
         raw_text = str(data)
-        assert "super_secret_ssh_pw" not in raw_text
-        assert "super_secret_enable_sec" not in raw_text
+        assert "mock_test_password_001" not in raw_text
+        assert "mock_test_enable_secret_001" not in raw_text
 
         # Device meta in memory must never expose secrets to frontend
         token = data["token"]

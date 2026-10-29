@@ -134,7 +134,7 @@ class TestSshConnectEndpoint:
                 "host": "10.10.20.181",
                 "username": "developer",
                 "port": 22,
-                "password": "sandbox-secret-pw",
+                "password": "mock_test_password_001",
                 "method": "direct",
                 "label": "Sandbox Switch Cat9k",
             },
@@ -150,7 +150,7 @@ class TestSshConnectEndpoint:
         assert meta["ssh_port"] == 22
         assert meta["ssh_console_user"] == "developer"
         assert meta["console_path"] == "ssh://10.10.20.181:22/developer"
-        assert "sandbox-secret-pw" not in resp.text
+        assert "mock_test_password_001" not in resp.text
 
     def test_host_port_parsing_extracts_port_without_duplicate(self):
         _clear_state()
