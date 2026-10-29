@@ -1,4 +1,4 @@
-import type { AuthResponse, DevicesResponse, SshConnectResponse } from '../types/api';
+import type { AuthResponse, DevicesResponse, SshConnectFields, SshConnectResponse } from '../types/api';
 
 // Same-origin API base: the app calls the API on whatever host/port it was
 // served from (empty string → relative `/api/...` URLs). This lets ANY machine
@@ -49,30 +49,70 @@ export async function postDevices(host: string, token: string, labId: string): P
 }
 
 /**
- * Connect to a REAL device via a terminal-server SSH console. Returns a session
- * token plus a single synthetic device that the SAME WebSocket terminal drives.
- * The password is sent once over HTTPS and is never echoed back.
+ * Connect to a REAL device via Direct SSH or a terminal-server SSH console.
+ * Returns a session token plus a single synthetic device that the WebSocket terminal drives.
+ * Passwords stay in transient memory and are never stored in browser storage or logged.
  */
 export async function postSshConnect(
-  host: string,
-  consoleUser: string,
-  consolePort: string,
-  password: string,
+  fieldsOrHost: SshConnectFields | string,
+  consoleUser?: string,
+  consolePort?: string,
+  password?: string,
   deviceType = 'cisco_ios',
 ): Promise<SshConnectResponse> {
+  let payload: Record<string, unknown>;
+
+  if (typeof fieldsOrHost === 'object' && fieldsOrHost !== null) {
+    const f = fieldsOrHost;
+    payload = {
+      host: f.host.trim(),
+      username: f.username.trim(),
+      console_user: f.username.trim(),
+      password: f.password,
+      secret: f.secret ? f.secret.trim() : undefined,
+      port: f.port ? parseInt(f.port, 10) : undefined,
+      console_port: (f.consolePort || '').trim(),
+      device_type: f.deviceType || 'cisco_ios',
+      method: f.method || 'direct',
+      label: (f.label || '').trim(),
+    };
+  } else {
+    payload = {
+      host: fieldsOrHost.trim(),
+      username: (consoleUser || '').trim(),
+      console_user: (consoleUser || '').trim(),
+      console_port: (consolePort || '').trim(),
+      password: password || '',
+      device_type: deviceType,
+      method: consolePort ? 'terminal_server' : 'direct',
+    };
+  }
+
   const res = await fetch(`${REST_BASE}/api/ssh/connect`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      host: host.trim(),
-      console_user: consoleUser.trim(),
-      console_port: consolePort.trim(),
-      password,
-      device_type: deviceType,
-    }),
+    body: JSON.stringify(payload),
   });
+
+  const body = await res.json().catch(() => null);
   if (!res.ok) {
-    throw new Error(`SSH connect failed (${res.status})`);
+    const detail = (body && (body.detail ?? body)) as
+      | { error?: string }
+      | string
+      | null;
+    const msg =
+      typeof detail === 'string'
+        ? detail
+        : detail?.error || `SSH connect failed (${res.status})`;
+    throw new Error(msg);
   }
-  return (await res.json()) as SshConnectResponse;
+  return body as SshConnectResponse;
+}
+
+/** Gracefully close and clean up an active session and its device connections. */
+export async function postDisconnect(token: string): Promise<void> {
+  if (!token) return;
+  await fetch(`${REST_BASE}/api/session/disconnect?token=${encodeURIComponent(token)}`, {
+    method: 'POST',
+  }).catch(() => {});
 }

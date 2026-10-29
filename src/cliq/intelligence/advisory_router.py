@@ -668,6 +668,9 @@ def route_post_enter_advisory(
     suggestion = analyze_device_error(command, output, help_lookup, prompt)
     if suggestion is None:
         return None
+    # Never suggest the exact same command that was rejected
+    if getattr(suggestion, "fix", None) and suggestion.fix.strip().lower() == command.strip().lower():
+        return None
     # Global-command protection: never let the fuzzy matcher swap a well-known
     # global command's first token into an unrelated keyword (show -> flow).
     if _fuzzy_corrupts_global(command, suggestion):

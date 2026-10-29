@@ -90,6 +90,11 @@ type Session = {
                          // happens"). Cleared on a successful reconnect (device
                          // reaches 'connected' again under the SAME session), which
                          // re-arms input without a page reload or re-login.
+  disconnected?: boolean;
+  intentionalExit?: boolean;
+  disconnectedNoticeShown?: boolean;
+  sessionGen?: string;
+  lastSeq?: number;
 };
 
 // In-session reconnect banner state surfaced to the terminal UI. Sticky at the
@@ -117,8 +122,8 @@ const RECONNECT_MAX_ATTEMPTS = RECONNECT_BACKOFFS_MS.length; // 3
 const RECONNECT_WATCHDOG_MS = 15000;
 // Heartbeat: how often the client pings the server, and how long it waits for a
 // pong before declaring the browser socket silently dead (→ freeze + reconnect).
-const HEARTBEAT_INTERVAL_MS = 20000;
-const HEARTBEAT_TIMEOUT_MS = 10000;
+const HEARTBEAT_INTERVAL_MS = 25000;
+const HEARTBEAT_TIMEOUT_MS = 25000;
 
 // ── Destructive-command detection (mirrors advisory_router.py) ─────────────
 // Configurable/extensible list — add a verb here and to the backend
@@ -285,6 +290,7 @@ export function useTerminalSessions(
   onRequestSwitch?: (deviceId: string) => void,
 ) {
   const wsRef = useRef<WebSocket | null>(null);
+  const socketGenRef = useRef<number>(0);
   const outboundQueueRef = useRef<WsOutbound[]>([]);
   const sessionsRef = useRef<Map<string, Session>>(new Map());
   const mountRefs = useRef<Map<string, HTMLDivElement>>(new Map());
@@ -313,7 +319,7 @@ export function useTerminalSessions(
   // masked credential dialog for that device. Credentials are sent over the WS
   // and never retained in this state after submit.
   const [authPrompt, setAuthPrompt] = useState<
-    { deviceId: string; label: string; message: string; retry: boolean } | null
+    { deviceId: string; label: string; message: string; retry: boolean; stage?: string; stageType?: string } | null
   >(null);
   // In-session reconnect — per-device sticky banner shown at the TOP of the
   // terminal while a dropped session is being resumed. null = healthy/hidden.
@@ -588,6 +594,11 @@ export function useTerminalSessions(
       busyTimer: null,
       feedInput: null,
       frozen: false,
+      disconnected: false,
+      intentionalExit: false,
+      disconnectedNoticeShown: false,
+      sessionGen: undefined,
+      lastSeq: 0,
     };
     // Phase 7 req 3 — Ctrl+. opens the inline Fix/Explain overlay when a
     // lightbulb is armed for this device. Intercept the keydown before xterm
@@ -607,12 +618,8 @@ export function useTerminalSessions(
       return true;
     });
 
-    const deviceLabel = deviceMap.get(deviceId)?.label ?? deviceId;
-    term.writeln(`\x1b[1;32mCLIQ\x1b[0m \x1b[32mConnected to ${deviceLabel}\x1b[0m`);
-    const initialPrompt = `${deviceLabel}>`;
-    promptRef.current[deviceId] = initialPrompt;
-    session.promptLen = initialPrompt.length + 1; // + trailing space
-    term.write(`${initialPrompt} `);
+    promptRef.current[deviceId] = '';
+    session.promptLen = 0;
 
     const handleTermData = (data: string): void => {
       // ── In-session reconnect: FREEZE input on connection loss ─────────
@@ -622,7 +629,7 @@ export function useTerminalSessions(
       // session is resumed (device reaches 'connected' again). Reconnect is
       // driven by the sticky banner's auto-retry / [Reconnect] button, never by
       // typing here. The value is intentionally not echoed or logged.
-      if (session.frozen) {
+      if (session.disconnected || session.frozen) {
         return;
       }
 
@@ -834,9 +841,10 @@ export function useTerminalSessions(
             },
           }));
         } else {
-          // Empty Enter: re-print the prompt immediately (no server round-trip)
-          const p = promptRef.current[deviceId] ?? '';
-          if (p) term.write(`${p} `);
+          // Empty Enter: forward to backend so the device console receives \r\n
+          // to dismiss "Press RETURN" banners, trigger router prompts, or refresh prompt.
+          send({ type: 'command', device_id: deviceId, command: '', raw: false });
+          setBusy(session);
         }
         // Bug 2: ALWAYS reset the input buffer on a command boundary, no matter
         // the validation outcome — nothing from this line can leak into the next.
@@ -1021,24 +1029,10 @@ export function useTerminalSessions(
         // Input changed: previously executed warnings are now stale — clear them.
         clearDeviceErrors(deviceId);
 
-        // Phase 6: '?' as the very first character triggers ask mode.
-        // Show a purple '? ' prompt prefix to indicate Q&A mode.
-        if (data === '?' && session.inputBuffer.length === 0 && !session.askMode) {
-          session.askMode = true;
-          const PURPLE = '\x1b[35m';
-          const RST2 = '\x1b[0m';
-          // Replace the current prompt text with a '? ' indicator
-          term.write(`\r${PURPLE}?${RST2} `);
-          session.inputBuffer = '?';
-          session.cursor = 1;
-          session.promptLen = 2; // '? ' prompt length during ask mode
-          return;
-        }
-
-        // Phase 7 (req 5): a '?' typed MID-LINE (buffer non-empty, not ask mode)
-        // is a device-native context-help request. Echo it, then ask the device
-        // for its OWN help output (passthrough — NOT CLIQ's Q&A).
-        if (data === '?' && session.inputBuffer.length > 0 && !session.askMode) {
+        // Objective 2: Cisco CLI help ('?') — whether typed at an empty line
+        // (bare '?') or mid-line ('show ?'), pass directly to device context help.
+        // Never hijack literal '?' to internal Ask Mode or append Enter.
+        if (data === '?' && !session.askMode) {
           // Capture the partial to query the device, THEN immediately drop it.
           const partial = session.inputBuffer;
           term.write('?');
@@ -1151,6 +1145,12 @@ export function useTerminalSessions(
   }
 
   function send(payload: WsOutbound) {
+    if ('device_id' in payload && payload.device_id && payload.type !== 'connect_device') {
+      const s = sessionsRef.current.get(payload.device_id);
+      if (s && (s.disconnected || s.intentionalExit)) {
+        return;
+      }
+    }
     // TEMP DIAGNOSTIC (SEV-1): trigger-labeled log of every write that reaches
     // the device, so the culprit re-submit after '?'-help can be confirmed on a
     // live run. The only legitimate device writes are user-initiated: 'command'
@@ -1220,7 +1220,7 @@ export function useTerminalSessions(
   // while a socket is already connecting.
   function reopenWebSocket() {
     const ws = wsRef.current;
-    if (ws && ws.readyState === WebSocket.CONNECTING) return;
+    if (ws && (ws.readyState === WebSocket.CONNECTING || ws.readyState === WebSocket.OPEN)) return;
     setWsEpoch((e) => e + 1);
   }
 
@@ -1229,6 +1229,9 @@ export function useTerminalSessions(
   function freezeAndReconnect(deviceId: string) {
     const session = sessionsRef.current.get(deviceId);
     if (session) {
+      if (session.disconnected || session.intentionalExit) {
+        return;
+      }
       session.frozen = true;
       clearGhost(session);
       clearHintBelow(session);
@@ -1301,12 +1304,15 @@ export function useTerminalSessions(
   function markReconnected(deviceId: string) {
     const ctrl = reconnectRef.current[deviceId];
     const session = sessionsRef.current.get(deviceId);
-    const wasReconnecting = Boolean(session?.frozen || ctrl?.active);
+    const wasReconnecting = Boolean(session?.frozen || ctrl?.active || session?.disconnected);
     if (!wasReconnecting) return;
     clearReconnectTimers(deviceId);
     if (ctrl) { ctrl.active = false; ctrl.attempt = 0; }
     if (session) {
       session.frozen = false;
+      session.disconnected = false;
+      session.intentionalExit = false;
+      session.disconnectedNoticeShown = false;
       const GRN = '\x1b[32m';
       const BOLD = '\x1b[1m';
       const RST = '\x1b[0m';
@@ -1676,8 +1682,16 @@ export function useTerminalSessions(
     [],
   );
 
+  const devicesKey = useMemo(
+    () => devices.map((d) => d.id).sort().join(','),
+    [devices],
+  );
+  const devicesRef = useRef(devices);
+  devicesRef.current = devices;
+
   useEffect(() => {
     if (!token || devices.length === 0) return;
+    const currentGen = ++socketGenRef.current;
     const cleanHost = host.trim();
     // Distinguishes an operator-driven teardown (unmount / host or token change)
     // from an unexpected socket death (backend killed / crashed / network drop).
@@ -1718,6 +1732,7 @@ export function useTerminalSessions(
     };
 
     ws.onopen = () => {
+      if (currentGen !== socketGenRef.current || ws !== wsRef.current) return;
       flushOutboundQueue();
       startHeartbeat();
       devices.forEach((device) => {
@@ -1731,12 +1746,23 @@ export function useTerminalSessions(
     };
 
     ws.onmessage = (event) => {
+      if (currentGen !== socketGenRef.current || ws !== wsRef.current) return;
+      // In-session reconnect heartbeat: ANY message received over WebSocket
+      // proves the connection is healthy and responsive.
+      clearPongTimer();
       const msg = JSON.parse(event.data) as WsInbound;
 
-      // In-session reconnect heartbeat: a pong confirms the socket is alive.
+      // A pong confirms the socket is alive (timer already cleared).
       if (msg.type === 'pong') {
-        clearPongTimer();
         return;
+      }
+
+      // Stale session generation guard: drop events belonging to an older session generation
+      if ('session_gen' in msg && msg.session_gen && 'device_id' in msg && msg.device_id) {
+        const session = sessionsRef.current.get(msg.device_id);
+        if (session && session.sessionGen && session.sessionGen !== msg.session_gen) {
+          return;
+        }
       }
 
       // TEMP TRACE (diagnostic): every inbound WS message BEFORE processing. For
@@ -1754,6 +1780,9 @@ export function useTerminalSessions(
 
       if (msg.type === 'device_output') {
         const session = ensureSession(msg.device_id);
+        if (msg.session_gen && !session.sessionGen) {
+          session.sessionGen = msg.session_gen;
+        }
         // Bug 4: while a mid-line '?' help round-trip is in flight, DROP any
         // prompt redraw. This is the dangling 'C8k#' line the user sees before
         // the help options — detect (helpPending) and drop it. The pending help
@@ -1769,6 +1798,7 @@ export function useTerminalSessions(
         // Phase 3: a command's output finished streaming; leave streaming mode.
         // When output streamed live the backend sends an empty body here, so the
         // normal render below just draws the fresh prompt (no double output).
+        const wasStreaming = session.streaming;
         session.streaming = false;
         // First reply after a console attach: drop the "Connecting…" state.
         if (session.connecting) {
@@ -1820,8 +1850,10 @@ export function useTerminalSessions(
               : {
                   deviceId: msg.device_id,
                   label: deviceMap.get(msg.device_id)?.label ?? msg.device_id,
-                  message: 'Authentication required — enter credentials',
+                  message: authStage === 'password' ? 'Enable Secret Required — enter device enable password' : 'Authentication required — enter credentials',
                   retry: false,
+                  stage: authStage,
+                  stageType: authStage === 'password' ? 'enable' : undefined,
                 },
           );
           // Auth dialog owns input now — leave the busy-gate (discard queued
@@ -1832,10 +1864,21 @@ export function useTerminalSessions(
         }
         // Only render output if non-empty to avoid extra blank lines
         if (output && output.length > 0) {
-          session.term.write(`\r\n${output.replace(/\n/g, '\r\n')}\r\n`);
-        } else if (output.length === 0 && prompt) {
-          // Command completed with no output; just show new line before prompt
-          session.term.write('\r\n');
+          const activeBuf = session.term.buffer?.active;
+          if (activeBuf && activeBuf.cursorX > 0) {
+            session.term.write('\r\n');
+          }
+          const formatted = output.replace(/\n/g, '\r\n');
+          session.term.write(formatted);
+          if (!formatted.endsWith('\r\n')) {
+            session.term.write('\r\n');
+          }
+        } else if (wasStreaming && prompt) {
+          // Streamed output ended; ensure newline before prompt if not at column 0
+          const activeBuf = session.term.buffer?.active;
+          if (activeBuf && activeBuf.cursorX > 0) {
+            session.term.write('\r\n');
+          }
         }
         if (prompt) {
           // Bug 10: a real device prompt means any prior interactive login is
@@ -1844,7 +1887,17 @@ export function useTerminalSessions(
           promptRef.current[msg.device_id] = prompt;
           session.promptLen = prompt.length + 1; // + trailing space
           session.cursor = 0;
-          session.term.write(`${prompt} `);
+
+          // Deduplicate prompt: do not render if current line already ends with prompt
+          const activeBuf = session.term.buffer?.active;
+          const currentLine = activeBuf?.getLine(activeBuf.cursorY)?.translateToString(true) ?? '';
+          const alreadyHasPrompt = currentLine.trim().endsWith(prompt);
+          if (!alreadyHasPrompt) {
+            if (activeBuf && activeBuf.cursorX > 0) {
+              session.term.write('\r\n');
+            }
+            session.term.write(`${prompt} `);
+          }
           // Guided config block (req 2): auto-load the next step for review.
           // ADVISORY — the engineer still presses Enter; nothing auto-runs.
           if (session.pendingBlock.length > 0) {
@@ -1872,8 +1925,11 @@ export function useTerminalSessions(
             releaseBusy(session);
           }
         } else {
-          // No prompt in this frame (e.g. a mid-flow partial). If we were busy,
-          // keep waiting for the prompt; the safety timer prevents a freeze.
+          promptRef.current[msg.device_id] = '';
+          session.promptLen = 0;
+          session.inputBuffer = '';
+          session.cursor = 0;
+          releaseBusy(session);
         }
         return;
       }
@@ -1948,9 +2004,11 @@ export function useTerminalSessions(
         // clear any stale "Connecting…" flag so the line below reads cleanly.
         const session = ensureSession(msg.device_id);
         session.connecting = false;
+        const isEnable = msg.stage_type === 'enable' || (msg.message && msg.message.toLowerCase().includes('enable'));
+        const displayMsg = msg.message ?? (isEnable ? 'Enable Secret Required — enter device enable password' : 'Authentication required — enter credentials');
         const LOCK = '\x1b[33m'; // amber
         session.term.write(
-          `\r\n${LOCK}\uD83D\uDD10 ${msg.message ?? 'Authentication required — enter credentials'}${RESET}`,
+          `\r\n${LOCK}\uD83D\uDD10 ${displayMsg}${RESET}`,
         );
         // Bug 10: enter AUTH_PASSTHROUGH — the terminal stops validating/echoing
         // input; the secure masked dialog below is the only credential path.
@@ -1958,8 +2016,10 @@ export function useTerminalSessions(
         setAuthPrompt({
           deviceId: msg.device_id,
           label: msg.label ?? msg.device_id,
-          message: msg.message ?? 'Authentication required — enter credentials',
+          message: displayMsg,
           retry: msg.retry === true,
+          stage: msg.stage ?? 'password',
+          stageType: isEnable ? 'enable' : (msg.stage_type ?? undefined),
         });
         // Auth dialog owns input — lift the busy-gate and discard queued keys so
         // nothing typed pre-auth is replayed onto a credential prompt.
@@ -1978,14 +2038,17 @@ export function useTerminalSessions(
         // drop the chunk entirely if nothing real remains — a delayed/empty read
         // must never render a symbol.
         const clean = stripDisplayCtrl(msg.chunk ?? '');
-        if (!clean.trim()) return;
-        const chunk = clean.replace(/\n/g, '\r\n');
+        if (!clean) return;
+        const chunk = clean.replace(/\r\n/g, '\n').replace(/\n/g, '\r\n');
         if (!chunk) return;
         if (!session.streaming) {
           session.streaming = true;
           clearGhost(session);
           clearHintBelow(session);
-          session.term.write('\r\n');
+          const activeBuf = session.term.buffer?.active;
+          if (activeBuf && activeBuf.cursorX > 0) {
+            session.term.write('\r\n');
+          }
         }
         session.term.write(chunk);
         // Bug 10: if an interactive login prompt streams in mid-output, switch
@@ -2134,8 +2197,27 @@ export function useTerminalSessions(
             const BOLD = '\x1b[1m';
             const RST = '\x1b[0m';
             session.term.write(`\r\n${CLIQ}${BOLD}⚡ CLIQ:${RST}${CLIQ} ${msg.what}${RST}\r\n`);
-            const p = promptRef.current[msg.device_id] ?? '$';
-            session.term.write(`${p} `);
+            if (msg.what === 'Device not connected' || session.disconnected) {
+              session.disconnected = true;
+              session.frozen = true;
+              promptRef.current[msg.device_id] = '';
+              session.promptLen = 0;
+              session.inputBuffer = '';
+              session.cursor = 0;
+              if (!session.disconnectedNoticeShown) {
+                session.disconnectedNoticeShown = true;
+                session.term.write('\r\n\x1b[33m⚡ CLIQ: Device disconnected — reconnect to continue.\x1b[0m\r\n');
+              }
+              setReconnectBanner(msg.device_id, {
+                phase: 'failed',
+                attempt: 0,
+                maxAttempts: RECONNECT_MAX_ATTEMPTS,
+                message: 'Device disconnected. Click Reconnect to resume.',
+              });
+            } else {
+              const p = promptRef.current[msg.device_id] ?? '$';
+              session.term.write(`${p} `);
+            }
             // A TERMINAL error (execution failed / not connected) carries NO
             // inputKey and is NOT followed by a device_output, so this prompt is
             // the command boundary — lift the busy-gate and replay queued keys.
@@ -2182,12 +2264,48 @@ export function useTerminalSessions(
       }
 
       if (msg.type === 'session_expired') {
+        const session = sessionsRef.current.get(msg.device_id);
+        if (msg.reason === 'closed_by_user' || (session && (session.disconnected || session.intentionalExit))) {
+          promptRef.current[msg.device_id] = '';
+          if (session) {
+            session.disconnected = true;
+            session.frozen = true;
+            session.intentionalExit = true;
+            session.promptLen = 0;
+            session.inputBuffer = '';
+            session.cursor = 0;
+            clearGhost(session);
+            clearHintBelow(session);
+            clearReconnectTimers(msg.device_id);
+            const ctrl = reconnectRef.current[msg.device_id];
+            if (ctrl) ctrl.active = false;
+            if (!session.disconnectedNoticeShown) {
+              session.disconnectedNoticeShown = true;
+              const text = msg.message ?? '⚡ CLIQ: Device disconnected — reconnect to continue.';
+              session.term.write(`\r\n\x1b[33m${text}\x1b[0m\r\n`);
+            }
+            setReconnectBanner(msg.device_id, {
+              phase: 'failed',
+              attempt: 0,
+              maxAttempts: RECONNECT_MAX_ATTEMPTS,
+              message: 'Device disconnected. Click Reconnect to resume.',
+            });
+          }
+          setMetrics((current) => ({
+            ...current,
+            [msg.device_id]: {
+              ...(current[msg.device_id] ?? defaultMetrics()),
+              status: 'disconnected',
+              latency: 0,
+            },
+          }));
+          return;
+        }
         // Session Health Monitor: the device session died mid-use. FREEZE input
         // immediately (no commands into a dead socket), surface the sticky
         // reconnect banner at the top of the terminal, and begin auto-reconnect
         // under the SAME session token (no re-login). The backend has released
         // the runtime + console lock, so connect_device re-attaches cleanly.
-        const session = sessionsRef.current.get(msg.device_id);
         if (session) {
           const YEL = '\x1b[33m';
           const BOLD = '\x1b[1m';
@@ -2196,6 +2314,44 @@ export function useTerminalSessions(
           session.term.write(`\r\n${YEL}${BOLD}⚠ CLIQ:${RST}${YEL} ${text}${RST}\r\n`);
         }
         freezeAndReconnect(msg.device_id);
+        setMetrics((current) => ({
+          ...current,
+          [msg.device_id]: {
+            ...(current[msg.device_id] ?? defaultMetrics()),
+            status: 'disconnected',
+            latency: 0,
+          },
+        }));
+        return;
+      }
+
+      if (msg.type === 'device_disconnected') {
+        promptRef.current[msg.device_id] = '';
+        const session = sessionsRef.current.get(msg.device_id);
+        if (session) {
+          session.disconnected = true;
+          session.frozen = true;
+          session.intentionalExit = true;
+          session.promptLen = 0;
+          session.inputBuffer = '';
+          session.cursor = 0;
+          clearGhost(session);
+          clearHintBelow(session);
+          clearReconnectTimers(msg.device_id);
+          const ctrl = reconnectRef.current[msg.device_id];
+          if (ctrl) ctrl.active = false;
+          if (!session.disconnectedNoticeShown) {
+            session.disconnectedNoticeShown = true;
+            const text = msg.message ?? '⚡ CLIQ: Device disconnected — reconnect to continue.';
+            session.term.write(`\r\n\x1b[33m${text}\x1b[0m\r\n`);
+          }
+          setReconnectBanner(msg.device_id, {
+            phase: 'failed',
+            attempt: 0,
+            maxAttempts: RECONNECT_MAX_ATTEMPTS,
+            message: 'Device disconnected. Click Reconnect to resume.',
+          });
+        }
         setMetrics((current) => ({
           ...current,
           [msg.device_id]: {
@@ -2216,20 +2372,46 @@ export function useTerminalSessions(
         if ((msg.status ?? 'connected') === 'connected') {
           const s = sessionsRef.current.get(msg.device_id);
           if (s) {
+            if (msg.session_gen) {
+              s.sessionGen = msg.session_gen;
+            }
+            const isFirstConnect = !s.everConnected;
             s.everConnected = true;
             s.connecting = false;
+            s.disconnected = false;
+            s.intentionalExit = false;
+            s.frozen = false;
+            s.disconnectedNoticeShown = false;
             // Bug 10: login completed (device reached a connected status) —
             // leave AUTH_PASSTHROUGH so normal command processing resumes.
             setAuthActive(s, msg.device_id, null);
+
+            if (isFirstConnect) {
+              const deviceLabel = deviceMap.get(msg.device_id)?.label ?? msg.device_id;
+              s.term.writeln(`\x1b[1;32mCLIQ\x1b[0m \x1b[32mConnected to ${deviceLabel}\x1b[0m`);
+            }
           }
           // In-session reconnect: if this device was mid-reconnect, resume it —
           // re-arm input, clear the sticky banner, and confirm in the terminal.
           markReconnected(msg.device_id);
-        }
-        if ('prompt' in msg && typeof msg.prompt === 'string' && msg.prompt.trim()) {
-          promptRef.current[msg.device_id] = msg.prompt.trim();
+        } else if (msg.status === 'disconnected') {
+          promptRef.current[msg.device_id] = '';
           const s = sessionsRef.current.get(msg.device_id);
-          if (s) s.promptLen = msg.prompt.trim().length + 1;
+          if (s) {
+            s.disconnected = true;
+            s.frozen = true;
+            s.promptLen = 0;
+            s.inputBuffer = '';
+            s.cursor = 0;
+            clearGhost(s);
+            clearHintBelow(s);
+          }
+        }
+        if ('prompt' in msg && typeof msg.prompt === 'string') {
+          const trimmedPrompt = msg.prompt.trim();
+          promptRef.current[msg.device_id] = trimmedPrompt;
+          const s = sessionsRef.current.get(msg.device_id);
+          if (s) s.promptLen = trimmedPrompt ? trimmedPrompt.length + 1 : 0;
         }
         setMetrics((current) => ({
           ...current,
@@ -2483,6 +2665,7 @@ export function useTerminalSessions(
     };
 
     ws.onerror = () => {
+      if (currentGen !== socketGenRef.current || ws !== wsRef.current) return;
       setMetrics((current) => {
         const next = { ...current };
         devices.forEach((d) => {
@@ -2501,7 +2684,7 @@ export function useTerminalSessions(
       // auto-reconnect under the SAME token/host (no re-login, no fresh
       // terminal, scrollback preserved).
       stopHeartbeat();
-      if (intentionalClose) return;
+      if (currentGen !== socketGenRef.current || ws !== wsRef.current || intentionalClose) return;
       const YEL = '\x1b[33m';
       const BOLD = '\x1b[1m';
       const RST = '\x1b[0m';
@@ -2511,6 +2694,9 @@ export function useTerminalSessions(
       ]);
       ids.forEach((deviceId) => {
         const session = sessionsRef.current.get(deviceId);
+        if (session && (session.disconnected || session.intentionalExit)) {
+          return;
+        }
         // Announce the drop once (only when not already reconnecting), then
         // freeze + start the auto-reconnect controller for this device.
         if (session && !session.frozen) {
@@ -2536,11 +2722,15 @@ export function useTerminalSessions(
     return () => {
       intentionalClose = true;
       stopHeartbeat();
-      ws.close();
-      wsRef.current = null;
+      try {
+        ws.close();
+      } catch { /* already closing */ }
+      if (wsRef.current === ws) {
+        wsRef.current = null;
+      }
       outboundQueueRef.current = [];
     };
-  }, [devices, host, token, wsEpoch]);
+  }, [devicesKey, host, token, wsEpoch]);
 
   useEffect(() => {
     const onResize = () => {
@@ -2557,8 +2747,8 @@ export function useTerminalSessions(
   // Bug 7: submit operator-entered credentials for a parked console login. The
   // values are sent straight over the WS and the dialog is dismissed; nothing
   // is retained client-side (no state, no logging of the password).
-  const submitAuth = useCallback((deviceId: string, username: string, password: string) => {
-    send({ type: 'auth_credentials', device_id: deviceId, username, password });
+  const submitAuth = useCallback((deviceId: string, username: string, password: string, stageType?: string) => {
+    send({ type: 'auth_credentials', device_id: deviceId, username, password, stage_type: stageType });
     // Bug 10: keep AUTH_PASSTHROUGH armed until the backend confirms a connected
     // status (device_status) or re-prompts — so the terminal stays inert while
     // complete_login runs. Only dismiss the visible dialog here.
@@ -2569,10 +2759,14 @@ export function useTerminalSessions(
     const session = sessionsRef.current.get(deviceId);
     if (session) {
       session.connecting = false;
-      // Bug 10: user abandoned the login — leave AUTH_PASSTHROUGH so the
+      // User abandoned the login — leave AUTH_PASSTHROUGH so the
       // terminal is usable again (no permanently swallowed keystrokes).
       setAuthActive(session, deviceId, null);
-      session.term.write(`\r\n${DIM}Login cancelled.${RESET}`);
+      const p = promptRef.current[deviceId] ?? '';
+      session.term.write(`\r\n${DIM}Authentication cancelled.${RESET}\r\n${p} `);
+    }
+    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({ type: 'cancel_auth', device_id: deviceId }));
     }
     setAuthPrompt(null);
   }, []);
@@ -2585,7 +2779,15 @@ export function useTerminalSessions(
     ctrl.active = true;
     ctrl.attempt = 1;
     const session = sessionsRef.current.get(deviceId);
-    if (session) session.frozen = true;
+    if (session) {
+      session.frozen = true;
+      session.disconnected = false;
+      session.intentionalExit = false;
+      session.disconnectedNoticeShown = false;
+      session.inputBuffer = '';
+      session.cursor = 0;
+      session.promptLen = 0;
+    }
     setReconnectBanner(deviceId, {
       phase: 'retrying',
       attempt: 1,
@@ -2597,7 +2799,17 @@ export function useTerminalSessions(
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // Explicitly request elevation to privileged EXEC mode ('#')
+  const requestEnable = useCallback(
+    (deviceId: string) => {
+      send({ type: 'request_enable', device_id: deviceId });
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [],
+  );
+
   return {
+    requestEnable,
     metrics, errors, liveHints,
     intelItems,
     activeContext,

@@ -338,19 +338,16 @@ def best_matches(bad_token: str, options: list[str], limit: int = 3) -> list[str
     if not bad:
         return []
 
-    # Global-command protection — never substitute a protected global command's
-    # token for an unrelated keyword one edit away (show -> flow).
+    # Never substitute a protected global command or suggest an identical token
     options = [
         opt for opt in options
-        if not is_protected_substitution(bad_token, opt)
+        if opt.lower() != bad and not is_protected_substitution(bad_token, opt)
     ]
 
     prefix_hits: list[tuple[int, str]] = []
     edit_hits: list[tuple[int, int, int, int, str]] = []
     for opt in options:
         low = opt.lower()
-        if low == bad:
-            return [opt]
         if low.startswith(bad) or bad.startswith(low):
             # Shorter completions are the most likely intent.
             prefix_hits.append((abs(len(low) - len(bad)), opt))
@@ -463,11 +460,13 @@ def build_suggestion(
     """
     prefix = (valid_prefix or "").strip()
     matches = best_matches(bad_token, options)
+    full_typed = " ".join([p for p in (prefix, bad_token, *trailing) if p]).strip()
     if matches:
         parts = [p for p in (prefix, matches[0], *trailing) if p]
         fix = " ".join(parts).strip()
-        return DidYouMean(message=f"Did you mean: {fix}?", fix=fix)
-    if has_cr and prefix:
+        if fix.lower() != full_typed.lower():
+            return DidYouMean(message=f"Did you mean: {fix}?", fix=fix)
+    if has_cr and prefix and prefix.lower() != full_typed.lower():
         # The prefix alone is a complete command — the trailing word is extra.
         return DidYouMean(message=f"Did you mean: {prefix}?", fix=prefix)
     if options:
@@ -544,6 +543,20 @@ def analyze_device_error(
             if cap_fallback is not None:
                 return cap_fallback
     options, has_cr = parse_help_options(page or "")
+    if not options:
+        try:
+            from cliq.db.query import CommandDB
+            cdb = CommandDB()
+            prefix_toks = valid_prefix.strip().split()
+            derived_opts = set()
+            for fc in cdb.all_full_commands():
+                fc_toks = fc.split()
+                if len(fc_toks) > len(prefix_toks):
+                    if [t.lower() for t in fc_toks[:len(prefix_toks)]] == [t.lower() for t in prefix_toks]:
+                        derived_opts.add(fc_toks[len(prefix_toks)])
+            options = sorted(derived_opts)
+        except Exception:
+            pass
     # Bug G — Platform-Dependent token rejected. A known Cat9k-only subsystem
     # (e.g. 'fed') typed on a C8000v is rejected; surface the platform-correct
     # alternative sourced from the device's OWN '<prefix> ?' option set.

@@ -268,12 +268,15 @@ class TestConnectIdentify:
         # 'show version' really was executed on the fake channel.
         assert any(c.startswith("show version") for c in conn.sent_commands)
 
-    def test_enable_called_when_in_user_exec(self, monkeypatch):
+    def test_enable_not_called_when_in_user_exec(self, monkeypatch):
+        """Phase L: Do not run enable automatically as part of prompt detection or connect.
+        Device preserves its natural user EXEC mode ('Router>') without auto-escalation."""
         fake = FakeNetmikoConn(prompt="Router>")
         monkeypatch.setattr(sshmod, "ConnectHandler", lambda **kw: fake)
         dev = SSHConsoleDevice("h", "u", "p", port_user="19")
         dev.connect()
-        assert fake._enabled is True  # escalated from user EXEC to privileged
+        assert fake._enabled is False  # preserves natural mode; no auto-enable
+        assert dev.current_prompt == "Router>"
 
     def test_connect_emits_ssh_console_event_with_redaction(self, monkeypatch, fake_conn):
         events: list[dict] = []

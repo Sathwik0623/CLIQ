@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import LoginStep, { type SshConnectFields } from './components/LoginStep';
 import LabDeviceStep from './components/LabDeviceStep';
 import MainTerminalUi from './components/MainTerminalUi';
-import { postAuth, postDevices, postSshConnect } from './lib/api';
+import { postAuth, postDevices, postSshConnect, postDisconnect } from './lib/api';
 import type { Device, Lab, TopologyLink, TopologyNode } from './types/api';
 
 type Stage = 'login' | 'select' | 'terminal';
@@ -23,6 +23,7 @@ export default function App() {
   const [activeDeviceId, setActiveDeviceId] = useState('');
   const [precheckDeviceId, setPrecheckDeviceId] = useState<string | null>(null);
   const precheckTimerRef = useRef<number | null>(null);
+  const connectingRef = useRef(false);
 
   const selectedLab = labs.find((l) => l.id === selectedLabId);
   const labTitle = selectedLab?.title ?? selectedLabId;
@@ -77,24 +78,19 @@ export default function App() {
   }
 
   async function handleSshConnect(fields: SshConnectFields) {
+    if (connectingRef.current || loading) return;
+    connectingRef.current = true;
     setLoading(true);
     setError('');
     try {
-      const data = await postSshConnect(
-        fields.host,
-        fields.consoleUser,
-        fields.consolePort,
-        fields.password,
-      );
+      const data = await postSshConnect(fields);
       if (!data.success) {
         setError(data.error || 'SSH connection was not successful.');
         return;
       }
-      // SSH sessions have no CML labs/topology — seed the single real device and
-      // jump straight into the SAME terminal UI the CML path uses.
       setHost(data.host);
       setToken(data.token);
-      setUserName(fields.consoleUser);
+      setUserName(fields.username);
       setLabs([]);
       setSelectedLabId('');
       setReservationWarning('');
@@ -110,6 +106,7 @@ export default function App() {
       setError(e instanceof Error ? e.message : 'Failed to connect over SSH');
     } finally {
       setLoading(false);
+      connectingRef.current = false;
     }
   }
 
@@ -186,10 +183,15 @@ export default function App() {
       window.clearTimeout(precheckTimerRef.current);
       precheckTimerRef.current = null;
     }
+    if (token) {
+      void postDisconnect(token);
+    }
     setOpenDeviceIds(new Set());
     setActiveDeviceId('');
     setPrecheckDeviceId(null);
-    setStage('select');
+    setDevices([]);
+    setToken('');
+    setStage(labs.length > 0 ? 'select' : 'login');
   }
 
   return (

@@ -64,6 +64,18 @@ export type DevicesResponse = {
 };
 
 /** Response from POST /api/ssh/connect — one real device over an SSH console. */
+export type SshConnectFields = {
+  method: 'direct' | 'terminal_server';
+  label?: string;
+  host: string;
+  port?: string;
+  username: string;
+  password: string;
+  secret?: string;
+  consolePort?: string;
+  deviceType?: string;
+};
+
 export type SshConnectResponse = {
   success: boolean;
   token: string;
@@ -249,12 +261,13 @@ export type IntelPanelItem = IntelAnswerItem | IntelMemoryItem | IntelValidation
 // ── WebSocket protocol ───────────────────────────────────────────────────────
 
 export type WsInbound =
-  | { type: 'device_output'; device_id: string; output: string; prompt?: string; paging?: boolean }
-  | { type: 'device_status'; device_id: string; mode?: string; latency?: number; status?: string; prompt?: string }
+  | { type: 'device_output'; device_id: string; output: string; prompt?: string; paging?: boolean; session_gen?: string; seq?: number }
+  | { type: 'device_status'; device_id: string; mode?: string; latency?: number; status?: string; prompt?: string; session_gen?: string; seq?: number }
+  | { type: 'device_disconnected'; device_id: string; reason?: string; message?: string; prompt?: string; session_gen?: string; seq?: number }
   // Session Health Monitor: the device session died mid-use (reservation
   // reclaimed / socket gone / re-auth demanded / persistent empty reads). Clean
   // notice over the EXISTING channel — surfaced in the same terminal.
-  | { type: 'session_expired'; device_id: string; reason: string; prompt_last_seen?: string; message?: string }
+  | { type: 'session_expired'; device_id: string; reason: string; prompt_last_seen?: string; message?: string; session_gen?: string; seq?: number }
   // Phase 3 latency masking: console attach in progress (~10s) / live output stream
   | { type: 'device_connecting'; device_id: string; label?: string }
   | { type: 'device_stream'; device_id: string; chunk: string }
@@ -281,12 +294,14 @@ export type WsInbound =
   // Gate resolved with 'n': the held command was discarded and NEVER sent.
   | { type: 'confirm_resolved'; device_id: string; outcome: 'discarded'; command: string; prompt?: string }
   // Bug 7: console requires interactive login — prompt the operator for creds.
-  | { type: 'device_auth_required'; device_id: string; label?: string; stage?: 'username' | 'password'; message?: string; retry?: boolean }
+  | { type: 'device_auth_required'; device_id: string; label?: string; stage?: 'username' | 'password'; stage_type?: 'enable' | 'login' | string; message?: string; retry?: boolean }
   // In-session reconnect heartbeat: server echo of a client ping so a silently
   // half-dead browser socket can be detected before the operator types into it.
   | { type: 'pong'; ts?: number };
 
 export type WsOutbound =
+  | { type: 'request_enable'; device_id: string }
+  | { type: 'cancel_auth'; device_id: string }
   | { type: 'connect_device'; device_id: string }
   | { type: 'command'; device_id: string; command: string; raw?: boolean }
   | { type: 'run_fix'; device_id: string; command: string }
@@ -309,7 +324,7 @@ export type WsOutbound =
   // Bug 4: client-side render-order telemetry (forwarded to observability).
   | { type: 'client_event'; device_id: string; layer: string; op: string; outcome: string; detail?: string }
   // Bug 7: masked credentials for a parked interactive console login.
-  | { type: 'auth_credentials'; device_id: string; username: string; password: string }
+  | { type: 'auth_credentials'; device_id: string; username: string; password: string; stage_type?: string }
   // In-session reconnect heartbeat: periodic client liveness ping (echoed as pong).
   | { type: 'ping'; ts?: number };
 

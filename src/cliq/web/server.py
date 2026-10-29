@@ -47,7 +47,7 @@ from cliq.connection.session_health import (
     HealthState,
     probe_session_health,
 )
-from cliq.connection.ssh_console_device import ConsoleBusyError, SSHConsoleDevice
+from cliq.connection.ssh_console_device import ConsoleBusyError, SSHConsoleDevice, parse_host_port
 from cliq.db.query import CommandDB
 from cliq.intelligence.engine import IntelligenceEngine
 from cliq.intelligence.command_template import (
@@ -126,16 +126,21 @@ class DevicesRequest(BaseModel):
 
 
 class SSHConnectRequest(BaseModel):
-    """Connect to a REAL device via a terminal-server SSH console.
+    """Connect to a network device via Direct SSH or Terminal-Server Console.
 
-    ``password`` is used in-memory only for the live SSH session and is NEVER
-    logged (observability redaction) or persisted.
+    ``password`` is held in-memory only for the live session and is NEVER
+    logged (observability redaction), returned in API responses, or persisted.
     """
     host: str
-    console_user: str
-    console_port: str
+    username: Optional[str] = ""
+    console_user: Optional[str] = ""
     password: str
-    device_type: str = "cisco_ios"
+    secret: Optional[str] = None
+    port: Optional[int] = None
+    console_port: Optional[str] = ""
+    device_type: Optional[str] = "cisco_ios"
+    method: Optional[str] = "direct"
+    label: Optional[str] = ""
 
 
 @dataclass
@@ -147,6 +152,7 @@ class AuthSession:
     auth: Optional[CMLAuthManager] = None
     # Which transport this session drives: "cml" (default) or "ssh".
     connection_type: str = "cml"
+    secret: Optional[str] = None
 
 
 @dataclass
@@ -196,6 +202,13 @@ class DeviceRuntime:
     # 0 on any successful command; once it crosses the empty-read limit the health
     # probe classifies the session dead with reason ``empty_reads``.
     empty_read_strikes: int = 0
+    session_gen: str = field(default_factory=lambda: uuid.uuid4().hex)
+    msg_seq: int = 0
+    interactive_state: str = "idle"
+
+    def next_seq(self) -> int:
+        self.msg_seq += 1
+        return self.msg_seq
 
 
 app = FastAPI(title="CLIQ Web API", version="0.1.0")
@@ -248,6 +261,8 @@ _DEVICE_RUNTIMES: dict[tuple[str, str], "DeviceRuntime"] = {}
 # session-grace reaper drops the whole session (and wipes creds) once the window
 # elapses with no reconnect. Empty for a session with a live socket.
 _SESSION_LAST_SEEN: dict[str, float] = {}
+_ACTIVE_SOCKETS_BY_TOKEN: dict[str, str] = {}
+_ACTIVE_WS_BY_TOKEN: dict[str, Any] = {}
 
 
 # Shared read-only intelligence stack.
@@ -2896,45 +2911,75 @@ def api_devices(payload: DevicesRequest) -> dict[str, Any]:
 
 @app.post("/api/ssh/connect")
 def api_ssh_connect(payload: SSHConnectRequest) -> dict[str, Any]:
-    """Register an SSH terminal-server console session and its single device.
+    """Register an SSH session (Direct device or Terminal-Server console).
 
-    This is the SSH analogue of ``/api/auth`` + ``/api/devices`` combined: the
-    real device is not reached here (the live SSH attach happens on the WS
-    ``connect_device``), we only mint a token and register a synthetic device so
-    the SAME WebSocket terminal loop can drive it. The password is held in
-    memory only for the live session and is NEVER logged (redaction) or written
-    to disk.
+    Credentials stay in transient memory for the active session only; passwords
+    are NEVER logged, persisted, or returned in API responses.
     """
-    host = payload.host.strip()
-    console_user = payload.console_user.strip()
-    console_port = str(payload.console_port).strip()
-    if not host or not console_user:
-        raise HTTPException(status_code=422, detail="host and console_user are required")
+    raw_host = (payload.host or "").strip()
+    user = (payload.username or payload.console_user or "").strip()
+    raw_port = payload.port
+    console_port = str(payload.console_port or "").strip()
+    method = (payload.method or "direct").strip().lower()
+
+    if payload.method == "terminal_server" or (not payload.username and payload.console_user and console_port):
+        method = "terminal_server"
+    else:
+        method = "direct"
+
+    if not raw_host:
+        raise HTTPException(status_code=422, detail="host is required")
+    if not user:
+        raise HTTPException(status_code=422, detail="username is required")
+
+    # Clean and parse host / port, stripping any accidental duplicate schemes/ports
+    clean_host, port = parse_host_port(raw_host, default_port=int(raw_port) if raw_port else 22)
+    if not clean_host:
+        raise HTTPException(status_code=422, detail="invalid host format")
+    if not (1 <= port <= 65535):
+        raise HTTPException(status_code=422, detail="port must be between 1 and 65535")
+
+    # Input validation: reject control characters, shell metacharacters, or semicolons
+    if re.search(r"[\s;`$|&><\x00-\x1f]", clean_host):
+        raise HTTPException(status_code=422, detail="host contains invalid characters")
 
     token = str(uuid.uuid4())
+    clean_secret = (payload.secret or "").strip() or None
     SESSIONS[token] = AuthSession(
-        host=host,
-        username=console_user,
+        host=clean_host,
+        username=user,
         password=payload.password,
         auth=None,
         connection_type="ssh",
+        secret=clean_secret,
     )
 
     device_id = f"ssh-{uuid.uuid4().hex[:8]}"
-    label = f"{console_user}:{console_port}@{host}" if console_port else f"{console_user}@{host}"
-    # console_path is used ONLY as the globally-unique exclusive-attach lock key.
-    console_path = f"ssh://{host}/{console_port or '0'}/{console_user}"
+    custom_label = (payload.label or "").strip()
+
+    if method == "direct":
+        label = custom_label or f"{user}@{clean_host}:{port}"
+        console_path = f"ssh://{clean_host}:{port}/{user}"
+    else:
+        label = custom_label or (f"{user}:{console_port}@{clean_host}" if console_port else f"{user}@{clean_host}")
+        console_path = f"ssh://{clean_host}:{port}/{console_port or '0'}/{user}"
+
+    device_type = (payload.device_type or "cisco_ios").strip() or "cisco_ios"
+
     DEVICES_BY_TOKEN[token] = {
         device_id: {
             "id": device_id,
             "lab_id": "ssh",
             "label": label,
-            "type": "",  # unknown until 'show version' → PID on connect
+            "type": "",
             "connection_type": "ssh",
-            "ssh_host": host,
-            "ssh_console_user": console_user,
+            "ssh_host": clean_host,
+            "ssh_port": port,
+            "ssh_console_user": user,
             "ssh_console_port": console_port,
-            "ssh_device_type": (payload.device_type or "cisco_ios").strip() or "cisco_ios",
+            "ssh_device_type": device_type,
+            "ssh_method": method,
+            "ssh_secret": clean_secret or "",
             "console_path": console_path,
             "status": "connected",
             "mode": "exec",
@@ -2943,14 +2988,12 @@ def api_ssh_connect(payload: SSHConnectRequest) -> dict[str, Any]:
         }
     }
 
-    # Analytics: SSH session created. Host is fine to log; credentials are not
-    # present in this event at all.
-    obs.log_usage("ssh_session_start", detail=host)
+    obs.log_usage("ssh_session_start", detail=f"{clean_host}:{port} ({method})")
 
     return {
         "success": True,
         "token": token,
-        "host": host,
+        "host": clean_host,
         "connection_type": "ssh",
         "device": {
             "id": device_id,
@@ -2963,6 +3006,24 @@ def api_ssh_connect(payload: SSHConnectRequest) -> dict[str, Any]:
             "node_state": "BOOTED",
         },
     }
+
+
+@app.post("/api/session/disconnect")
+def api_session_disconnect(token: str = "") -> dict[str, Any]:
+    """Gracefully close and discard a session, releasing console locks and clearing memory."""
+    clean_token = token.strip()
+    session = SESSIONS.pop(clean_token, None)
+    devices = DEVICES_BY_TOKEN.pop(clean_token, {})
+    for dev_id, meta in devices.items():
+        _CONSOLE_LOCKS.pop(meta.get("console_path", ""), None)
+        runtime = _DEVICE_RUNTIMES.pop((clean_token, dev_id), None)
+        if runtime and hasattr(runtime.device, "disconnect"):
+            try:
+                runtime.device.disconnect()
+            except Exception:
+                pass
+    _SESSION_LAST_SEEN.pop(clean_token, None)
+    return {"success": True, "disconnected": session is not None}
 
 
 @app.websocket("/ws")
@@ -2988,9 +3049,24 @@ async def ws_terminal(websocket: WebSocket, token: str, host: str) -> None:
             detail=token[:8],
         )
 
+    # Phase R: Close any prior active WebSocket for this token to prevent concurrent duplicate sessions
+    prior_ws = _ACTIVE_WS_BY_TOKEN.get(token)
+    if prior_ws and prior_ws != websocket:
+        try:
+            asyncio.create_task(prior_ws.close(code=1000, reason="Superseded by new connection"))
+        except Exception:
+            pass
+    _ACTIVE_WS_BY_TOKEN[token] = websocket
+
     # Unique owner id for this socket; identifies who holds each console lock.
     session_id = uuid.uuid4().hex
+    _ACTIVE_SOCKETS_BY_TOKEN[token] = session_id
     runtimes: dict[str, DeviceRuntime] = {}
+    # Phase R: Inherit active runtimes already connected for this token so a new socket
+    # or reconnected socket does not lose track of connected devices.
+    for (t, dev_id), rt in list(_DEVICE_RUNTIMES.items()):
+        if t == token and rt.status == "connected":
+            runtimes[dev_id] = rt
     # Bug 7: devices parked at an interactive login/password prompt, awaiting
     # operator credentials. Kept OUT of `runtimes` until login completes so the
     # command path never touches a half-authenticated channel. Channels stay
@@ -3106,6 +3182,8 @@ async def ws_terminal(websocket: WebSocket, token: str, host: str) -> None:
                 "reason": rv,
                 "prompt_last_seen": prompt_last_seen or runtime.prompt or "",
                 "message": "Device session expired or unreachable — please reconnect.",
+                "session_gen": runtime.session_gen,
+                "seq": runtime.next_seq(),
             }
         )
         # Registry cleanup — mirror the disconnect path: drop the advisory mirror,
@@ -3267,7 +3345,50 @@ async def ws_terminal(websocket: WebSocket, token: str, host: str) -> None:
             return
 
         if device_id in runtimes:
+            rt = runtimes[device_id]
+            prompt = rt.prompt or (rt.device.current_prompt if rt.device else "") or ""
+            await websocket.send_json({
+                "type": "device_status",
+                "device_id": device_id,
+                "mode": rt.mode,
+                "status": rt.status,
+                "latency": 0,
+                "prompt": prompt,
+            })
             return
+
+        # Reuse existing healthy session: do not open duplicate connection
+        existing = _DEVICE_RUNTIMES.get((token, device_id))
+        if existing and not getattr(existing, "dead", False) and existing.device and existing.device.is_connected:
+            is_alive = True
+            if hasattr(existing.device, "_conn") and existing.device._conn:
+                try:
+                    is_alive = existing.device._conn.is_alive()
+                except Exception:
+                    is_alive = False
+            if is_alive:
+                runtimes[device_id] = existing
+                prompt = existing.prompt or existing.device.current_prompt or ""
+                await websocket.send_json({
+                    "type": "device_status",
+                    "device_id": device_id,
+                    "mode": existing.mode,
+                    "status": "connected",
+                    "latency": 0,
+                    "prompt": prompt,
+                    "session_gen": existing.session_gen,
+                    "seq": existing.next_seq(),
+                })
+                await websocket.send_json({
+                    "type": "device_output",
+                    "device_id": device_id,
+                    "output": "",
+                    "prompt": prompt,
+                    "session_gen": existing.session_gen,
+                    "seq": existing.next_seq(),
+                })
+                _ensure_keepalive()
+                return
 
         # Bug J — exclusive console attach. The console is one shared TTY; if a
         # second CLIQ session attaches, the two interleave keystrokes/history.
@@ -3374,19 +3495,43 @@ async def ws_terminal(websocket: WebSocket, token: str, host: str) -> None:
         # same DeviceTransport surface, so the entire WS loop below (?-help,
         # ghost, reconciliation, learning, pager) runs UNCHANGED over either.
         if connection_type == "ssh":
-            device: "CMLConsoleDevice | SSHConsoleDevice" = SSHConsoleDevice(
-                host=meta["ssh_host"],
-                username=meta["ssh_console_user"],
-                password=session.password,
-                port_user=meta.get("ssh_console_port", ""),
-                device_type=meta.get("ssh_device_type", "cisco_ios"),
-            )
+            # Check if an existing connected runtime can be reused without creating duplicates
+            existing_rt = runtimes.get(device_id) or _DEVICE_RUNTIMES.get((token, device_id))
+            if existing_rt and getattr(existing_rt.device, "is_connected", False):
+                try:
+                    conn = getattr(existing_rt.device, "_conn", None)
+                    chan = getattr(conn, "remote_conn", None)
+                    chan_ok = chan is not None and not getattr(chan, "closed", False) and not getattr(chan, "eof_received", False)
+                    if chan_ok and conn.is_alive():
+                        log.info("Reusing existing healthy SSH connection for device %s", device_id)
+                        await _finalize_connection(existing_rt.device, device_id, meta, log_key, prior=True)
+                        return
+                except Exception:
+                    pass
+
+            import inspect
+            ssh_cls = SSHConsoleDevice
+            sig = inspect.signature(ssh_cls.__init__)
+            ssh_kwargs: dict[str, Any] = {
+                "host": meta["ssh_host"],
+                "username": meta["ssh_console_user"],
+                "password": session.password,
+                "port_user": meta.get("ssh_console_port", ""),
+                "device_type": meta.get("ssh_device_type", "cisco_ios"),
+            }
+            if "port" in sig.parameters:
+                ssh_kwargs["port"] = meta.get("ssh_port", 22)
+            if "method" in sig.parameters:
+                ssh_kwargs["method"] = meta.get("ssh_method", "direct")
+            if "secret" in sig.parameters:
+                ssh_kwargs["secret"] = meta.get("ssh_secret", "") or session.secret or ""
+            device: "CMLConsoleDevice | SSHConsoleDevice" = ssh_cls(**ssh_kwargs)
         else:
             device = CMLConsoleDevice(
                 gateway=session.host,
                 username=session.username,
                 password=session.password,
-                path=meta["console_path"],
+                path=meta.get("console_path") or meta.get("cml_path", ""),
             )
 
         # If CLIQ has prior memory for this device (lab_id/node_id), re-attach to
@@ -3456,17 +3601,7 @@ async def ws_terminal(websocket: WebSocket, token: str, host: str) -> None:
         the same connected state as one that didn't.
         """
         prompt = device.current_prompt or ""
-        if not prior and prompt.strip().endswith("#"):
-            # Fresh connect: start in exec mode so the first prompt is R1>.
-            # (On reconnect we deliberately keep the device's left-in mode.)
-            try:
-                await asyncio.to_thread(device.execute, "disable")
-                prompt = device.current_prompt or prompt
-            except Exception:
-                # Keep current prompt if disable is unsupported on a platform.
-                pass
-        if not prompt.strip():
-            prompt = f"{meta.get('label', device_id)}>"
+        # Do not force "disable" or fabricate prompt: preserve genuine prompt and mode
         mode = mode_from_prompt(prompt) if prompt else _parse_mode(prompt)
 
         # NOTE: the device pager is intentionally LEFT ENABLED. Long outputs page
@@ -3530,6 +3665,8 @@ async def ws_terminal(websocket: WebSocket, token: str, host: str) -> None:
                 "status": "connected",
                 "latency": 0,
                 "prompt": prompt,
+                "session_gen": runtimes[device_id].session_gen,
+                "seq": runtimes[device_id].next_seq(),
             }
         )
         # Restore prior command history so the user can arrow back through it.
@@ -3549,6 +3686,8 @@ async def ws_terminal(websocket: WebSocket, token: str, host: str) -> None:
                 "device_id": device_id,
                 "output": "",
                 "prompt": prompt,
+                "session_gen": runtimes[device_id].session_gen,
+                "seq": runtimes[device_id].next_seq(),
             }
         )
         # NOTE: No connect-time '?'-priming. A device is NEVER auto-issued a
@@ -3560,14 +3699,84 @@ async def ws_terminal(websocket: WebSocket, token: str, host: str) -> None:
         # device is connected. Starts at most once per WS session.
         _ensure_keepalive()
 
-    async def complete_device_auth(device_id: str, username: str, password: str) -> None:
-        """Bug 7: drive a parked console login with operator-supplied creds.
+    async def complete_device_auth(device_id: str, username: str, password: str, stage_type: str = "") -> None:
+        """Drive an auth prompt (console login or privileged enable) with operator-supplied creds.
 
-        Credentials arrive over the WS from the masked UI prompt, are used
-        in-memory only, and are NEVER persisted or logged. On success the device
-        finishes connecting exactly like a non-auth device; on rejection the UI
-        is asked to re-enter; on any other failure a real error is surfaced.
+        Credentials arrive over the WS from the masked UI prompt, are used in-memory only,
+        and are NEVER persisted or logged.
         """
+        active_rt = runtimes.get(device_id)
+        if not active_rt:
+            active_rt = _DEVICE_RUNTIMES.get((token, device_id))
+            if active_rt:
+                runtimes[device_id] = active_rt
+
+        is_enable = (
+            stage_type == "enable"
+            or (active_rt is not None and getattr(active_rt, "interactive_state", "") == "awaiting_enable_secret")
+            or (active_rt is not None and hasattr(active_rt.device, "enable") and device_id not in pending_auth and active_rt.mode != "enable")
+        )
+
+        # Check if this is an enable elevation for an already connected runtime
+        if is_enable and active_rt and hasattr(active_rt.device, "enable"):
+            active_rt.interactive_state = "submitting_enable_secret"
+            async with active_rt.lock:
+                try:
+                    await asyncio.to_thread(active_rt.device.enable, password)
+                    p = active_rt.device.current_prompt or active_rt.prompt
+                    active_rt.mode = _parse_mode(p)
+                    active_rt.prompt = p
+                    active_rt.interactive_state = "idle"
+                    await websocket.send_json({
+                        "type": "device_status",
+                        "device_id": device_id,
+                        "mode": active_rt.mode,
+                        "status": "connected",
+                        "prompt": p,
+                        "session_gen": getattr(active_rt, "session_gen", ""),
+                        "seq": active_rt.next_seq() if hasattr(active_rt, "next_seq") else 1,
+                    })
+                    await websocket.send_json({
+                        "type": "device_output",
+                        "device_id": device_id,
+                        "output": "",
+                        "prompt": p,
+                        "session_gen": getattr(active_rt, "session_gen", ""),
+                        "seq": active_rt.next_seq() if hasattr(active_rt, "next_seq") else 1,
+                    })
+                    return
+                except Exception as exc:
+                    clean_err = str(exc)
+                    if hasattr(active_rt.device, "secret") and active_rt.device.secret:
+                        clean_err = clean_err.replace(active_rt.device.secret, "<redacted>")
+                    if password:
+                        clean_err = clean_err.replace(password, "<redacted>")
+                    obs.log_event("auth", "enable_auth", "secret", "rejected", detail=f"{device_id}:{clean_err}")
+                    active_rt.interactive_state = "idle"
+                    p = active_rt.device.current_prompt or active_rt.prompt
+                    if hasattr(active_rt.device, "cancel_enable"):
+                        try:
+                            await asyncio.to_thread(active_rt.device.cancel_enable)
+                            p = active_rt.device.current_prompt or p
+                        except Exception:
+                            pass
+                    await websocket.send_json({
+                        "type": "device_output",
+                        "device_id": device_id,
+                        "output": "% Error in authentication.\r\n",
+                        "prompt": p,
+                        "session_gen": getattr(active_rt, "session_gen", ""),
+                        "seq": active_rt.next_seq() if hasattr(active_rt, "next_seq") else 1,
+                    })
+                    await websocket.send_json({
+                        "type": "error_panel",
+                        "device_id": device_id,
+                        "errorType": "wrong_mode",
+                        "what": "Enable Authentication Failed",
+                        "how": "Device rejected enable authentication. Verify your enable secret.",
+                    })
+                    return
+
         ctx = pending_auth.get(device_id)
         if not ctx:
             return
@@ -3658,7 +3867,7 @@ async def ws_terminal(websocket: WebSocket, token: str, host: str) -> None:
             # placeholder). Real output/prompt bytes pass through untouched.
             # No-op for CML (its cleaned deltas never carry control chars).
             delta = _sanitize_console_display(delta)
-            if not delta.strip():
+            if not delta:
                 return
             state["streamed"] = True
             # Per-byte diagnostic trace of the device_stream chunk sent to the
@@ -3710,8 +3919,112 @@ async def ws_terminal(websocket: WebSocket, token: str, host: str) -> None:
                     "reason": runtime.dead_reason or DeathReason.SOCKET_CLOSE.value,
                     "prompt_last_seen": runtime.prompt or "",
                     "message": "Device session expired or unreachable — please reconnect.",
+                    "session_gen": getattr(runtime, "session_gen", ""),
+                    "seq": runtime.next_seq() if hasattr(runtime, "next_seq") else 1,
                 }
             )
+            return
+
+        # Intercept 'enable' / 'en' commands to transition to privileged EXEC mode cleanly
+        if command.strip().lower() in ("enable", "en"):
+            # Check if current prompt already indicates privileged EXEC mode ('#')
+            is_already_priv = (
+                runtime.mode in ("enable", "config", "config-if", "config-line", "config-router")
+                or (runtime.prompt and runtime.prompt.strip().endswith("#"))
+            )
+            if not is_already_priv and hasattr(runtime.device, "check_enable_mode"):
+                try:
+                    is_already_priv = bool(runtime.device.check_enable_mode())
+                except Exception:
+                    pass
+
+            if is_already_priv:
+                await websocket.send_json({
+                    "type": "device_output",
+                    "device_id": device_id,
+                    "output": "Already in privileged EXEC mode.\r\n",
+                    "prompt": runtime.prompt,
+                    "session_gen": getattr(runtime, "session_gen", ""),
+                    "seq": runtime.next_seq() if hasattr(runtime, "next_seq") else 1,
+                })
+                return
+
+            # If SSH connection has enable capability, use SSH secret handling
+            if getattr(session, "connection_type", "") == "ssh" and hasattr(runtime.device, "enable"):
+                async with runtime.lock:
+                    try:
+                        await asyncio.to_thread(runtime.device.enable)
+                        prompt = runtime.device.current_prompt or runtime.prompt
+                        runtime.mode = _parse_mode(prompt)
+                        runtime.prompt = prompt
+                        await websocket.send_json({
+                            "type": "device_status",
+                            "device_id": device_id,
+                            "mode": runtime.mode,
+                            "status": runtime.status,
+                            "prompt": prompt,
+                            "session_gen": getattr(runtime, "session_gen", ""),
+                            "seq": runtime.next_seq() if hasattr(runtime, "next_seq") else 1,
+                        })
+                        await websocket.send_json({
+                            "type": "device_output",
+                            "device_id": device_id,
+                            "output": "",
+                            "prompt": prompt,
+                            "session_gen": getattr(runtime, "session_gen", ""),
+                            "seq": runtime.next_seq() if hasattr(runtime, "next_seq") else 1,
+                        })
+                        return
+                    except ValueError:
+                        prompt = runtime.device.current_prompt or runtime.prompt
+                        await websocket.send_json({
+                            "type": "device_output",
+                            "device_id": device_id,
+                            "output": "% No enable secret configured at login.\r\n",
+                            "prompt": prompt,
+                            "session_gen": getattr(runtime, "session_gen", ""),
+                            "seq": runtime.next_seq() if hasattr(runtime, "next_seq") else 1,
+                        })
+                        await websocket.send_json({
+                            "type": "error_panel",
+                            "device_id": device_id,
+                            "errorType": "wrong_mode",
+                            "what": "Enable Secret Missing",
+                            "how": "No enable secret was configured at login. Re-login and enter the enable secret to enter privileged mode.",
+                        })
+                        return
+                    except Exception as exc:
+                        clean_err = str(exc)
+                        if hasattr(runtime.device, "secret") and runtime.device.secret:
+                            clean_err = clean_err.replace(runtime.device.secret, "<redacted>")
+                        obs.log_event("auth", "enable_auth", "secret", "rejected", detail=f"{device_id}:{clean_err}")
+                        prompt = runtime.device.current_prompt or runtime.prompt
+                        await websocket.send_json({
+                            "type": "device_output",
+                            "device_id": device_id,
+                            "output": "% Error in authentication.\r\n",
+                            "prompt": prompt,
+                            "session_gen": getattr(runtime, "session_gen", ""),
+                            "seq": runtime.next_seq() if hasattr(runtime, "next_seq") else 1,
+                        })
+                        await websocket.send_json({
+                            "type": "error_panel",
+                            "device_id": device_id,
+                            "errorType": "wrong_mode",
+                            "what": "Enable Authentication Failed",
+                            "how": "Device rejected enable authentication. Verify your enable secret.",
+                        })
+                        return
+
+            # Interactive enable authentication: prompt user for enable secret without holding runtime lock
+            runtime.interactive_state = "awaiting_enable_secret"
+            await websocket.send_json({
+                "type": "device_auth_required",
+                "device_id": device_id,
+                "stage": "password",
+                "stage_type": "enable",
+                "message": "Enable Secret Required — enter device enable password",
+            })
             return
 
         # Drive an interactive IOS question (e.g. the one a bare 'configure'
@@ -3914,6 +4227,67 @@ async def ws_terminal(websocket: WebSocket, token: str, host: str) -> None:
                 )
             return
 
+        if not command.strip():
+            # Bare Enter on an empty line: forward to device channel to dismiss "Press RETURN"
+            # or refresh prompt, preserving genuine router prompt without validation overhead.
+            async with runtime.lock:
+                if (
+                    getattr(runtime, "dead", False)
+                    or getattr(runtime, "status", "") == "disconnected"
+                    or not runtime.device
+                    or not runtime.device.is_connected
+                ):
+                    return
+                t0 = time.perf_counter()
+                on_chunk, stream_state = _make_stream_bridge(device_id)
+                try:
+                    output, more = await asyncio.to_thread(
+                        runtime.device.execute_paged, "", on_chunk
+                    )
+                except Exception as exc:
+                    if await _guard_device_io_failure(device_id, runtime, exc):
+                        return
+                    await websocket.send_json(
+                        {
+                            "type": "error_panel",
+                            "device_id": device_id,
+                            "errorType": "wrong_mode",
+                            "what": "Command execution failed",
+                            "how": str(exc),
+                        }
+                    )
+                    return
+                latency_ms = round((time.perf_counter() - t0) * 1000)
+                runtime.empty_read_strikes = 0
+                output = _sanitize_console_display(output or "")
+                streamed = stream_state["streamed"]
+                prompt = runtime.device.current_prompt or ""
+                runtime.pager_active = False
+                runtime.mode = mode_from_prompt(prompt) if prompt else _parse_mode(prompt)
+                runtime.prompt = prompt
+                clean_out = output or ""
+                if clean_out and prompt and clean_out.rstrip().endswith(prompt):
+                    clean_out = clean_out.rstrip()[:-len(prompt)].rstrip()
+                await websocket.send_json(
+                    {
+                        "type": "device_output",
+                        "device_id": device_id,
+                        "output": "" if streamed else clean_out,
+                        "prompt": prompt,
+                    }
+                )
+                await websocket.send_json(
+                    {
+                        "type": "device_status",
+                        "device_id": device_id,
+                        "mode": runtime.mode,
+                        "status": runtime.status,
+                        "latency": latency_ms,
+                        "prompt": runtime.prompt,
+                    }
+                )
+                return
+
         # Safety validation before execution: uses legacy engine (fast, 195 commands).
         # NOT used for Q&A (which uses Phase 6 assistant with 1713 KB).
         analysis = _engine.analyze(command, runtime.mode, is_executing=True,
@@ -4060,7 +4434,16 @@ async def ws_terminal(websocket: WebSocket, token: str, host: str) -> None:
         # prompt by live_device._read_until) has been flushed to the client, the
         # next command cannot start. This prevents echoes / CLIQ messages from
         # interleaving out of order with the asynchronous invoke_shell() output.
+        is_exit_cmd = command.strip().lower() in ("exit", "quit", "logout")
         async with runtime.lock:
+            if (
+                getattr(runtime, "dead", False)
+                or getattr(runtime, "status", "") == "disconnected"
+                or not runtime.device
+                or not runtime.device.is_connected
+            ):
+                log.info("Discarding queued command %r after device disconnect (session_gen=%s)", command, getattr(runtime, "session_gen", ""))
+                return
             t0 = time.perf_counter()
             on_chunk, stream_state = _make_stream_bridge(device_id)
             try:
@@ -4070,6 +4453,50 @@ async def ws_terminal(websocket: WebSocket, token: str, host: str) -> None:
                     runtime.device.execute_paged, exec_cmd, on_chunk
                 )
             except Exception as exc:
+                if is_exit_cmd:
+                    # User-initiated exit closed the SSH session: report closure accurately
+                    # without triggering a false auto-reconnect loop.
+                    runtime.status = "disconnected"
+                    runtime.dead = True
+                    runtime.dead_reason = "closed_by_user"
+                    try:
+                        await asyncio.to_thread(runtime.device.disconnect)
+                    except Exception:
+                        pass
+                    _DEVICE_RUNTIMES.pop((token, device_id), None)
+                    runtimes.pop(device_id, None)
+                    meta = DEVICES_BY_TOKEN.get(token, {}).get(device_id, {})
+                    _CONSOLE_LOCKS.pop(meta.get("console_path", ""), None)
+
+                    await websocket.send_json({
+                        "type": "device_output",
+                        "device_id": device_id,
+                        "output": "\r\n[Connection to device closed]\r\n",
+                        "prompt": "",
+                        "session_gen": runtime.session_gen,
+                        "seq": runtime.next_seq(),
+                    })
+                    await websocket.send_json({
+                        "type": "device_status",
+                        "device_id": device_id,
+                        "mode": runtime.mode,
+                        "status": "disconnected",
+                        "latency": 0,
+                        "prompt": "",
+                        "session_gen": runtime.session_gen,
+                        "seq": runtime.next_seq(),
+                    })
+                    await websocket.send_json({
+                        "type": "device_disconnected",
+                        "device_id": device_id,
+                        "reason": "closed_by_user",
+                        "prompt": "",
+                        "message": "⚡ CLIQ: Device disconnected — reconnect to continue.",
+                        "session_gen": runtime.session_gen,
+                        "seq": runtime.next_seq(),
+                    })
+                    return
+
                 if await _guard_device_io_failure(device_id, runtime, exc):
                     return
                 await websocket.send_json(
@@ -4084,6 +4511,50 @@ async def ws_terminal(websocket: WebSocket, token: str, host: str) -> None:
                 return
 
             latency_ms = round((time.perf_counter() - t0) * 1000)
+            if is_exit_cmd and (
+                not runtime.device.is_connected
+                or (hasattr(runtime.device, "_conn") and runtime.device._conn and not runtime.device._conn.is_alive())
+            ):
+                runtime.status = "disconnected"
+                runtime.dead = True
+                runtime.dead_reason = "closed_by_user"
+                try:
+                    await asyncio.to_thread(runtime.device.disconnect)
+                except Exception:
+                    pass
+                _DEVICE_RUNTIMES.pop((token, device_id), None)
+                runtimes.pop(device_id, None)
+                meta = DEVICES_BY_TOKEN.get(token, {}).get(device_id, {})
+                _CONSOLE_LOCKS.pop(meta.get("console_path", ""), None)
+
+                await websocket.send_json({
+                    "type": "device_output",
+                    "device_id": device_id,
+                    "output": "\r\n[Connection to device closed]\r\n",
+                    "prompt": "",
+                    "session_gen": runtime.session_gen,
+                    "seq": runtime.next_seq(),
+                })
+                await websocket.send_json({
+                    "type": "device_status",
+                    "device_id": device_id,
+                    "mode": runtime.mode,
+                    "status": "disconnected",
+                    "latency": latency_ms,
+                    "prompt": "",
+                    "session_gen": runtime.session_gen,
+                    "seq": runtime.next_seq(),
+                })
+                await websocket.send_json({
+                    "type": "device_disconnected",
+                    "device_id": device_id,
+                    "reason": "closed_by_user",
+                    "prompt": "",
+                    "message": "⚡ CLIQ: Device disconnected — reconnect to continue.",
+                    "session_gen": runtime.session_gen,
+                    "seq": runtime.next_seq(),
+                })
+                return
             # Healthy read — reset the empty-read death strike counter.
             runtime.empty_read_strikes = 0
             # Display-boundary guard: strip control artifacts (^@/^C/C0) from the
@@ -4241,6 +4712,7 @@ async def ws_terminal(websocket: WebSocket, token: str, host: str) -> None:
                     "auth", "auth_passthrough", auth_stage, "prompt_detected",
                     detail=device_id,
                 )
+                is_enable_attempt = command.strip().lower() in ("enable", "en")
                 await websocket.send_json(
                     {
                         "type": "device_output",
@@ -4254,36 +4726,12 @@ async def ws_terminal(websocket: WebSocket, token: str, host: str) -> None:
                         "type": "device_auth_required",
                         "device_id": device_id,
                         "stage": auth_stage,
-                    }
-                )
-                return
-
-            # Bug 10 (defense-in-depth): if a command unexpectedly parks the
-            # device at an interactive login prompt (e.g. a session that aged
-            # out mid-flow), do NOT render the raw 'Password:' line as ordinary
-            # output or proceed to validate the next keystroke. Surface the
-            # secure credential dialog and let the frontend arm AUTH_PASSTHROUGH.
-            # The prompt text itself is the only thing emitted; nothing the user
-            # types afterward is echoed, logged, or validated.
-            auth_stage = looks_like_auth_prompt(output or "")
-            if auth_stage:
-                obs.log_event(
-                    "auth", "auth_passthrough", auth_stage, "prompt_detected",
-                    detail=device_id,
-                )
-                await websocket.send_json(
-                    {
-                        "type": "device_output",
-                        "device_id": device_id,
-                        "output": "" if streamed else (output or ""),
-                        "prompt": "",
-                    }
-                )
-                await websocket.send_json(
-                    {
-                        "type": "device_auth_required",
-                        "device_id": device_id,
-                        "stage": auth_stage,
+                        "stage_type": "enable" if is_enable_attempt else "login",
+                        "message": (
+                            "Enable Secret Required — enter device enable password"
+                            if is_enable_attempt
+                            else "Authentication required — enter credentials"
+                        ),
                     }
                 )
                 return
@@ -4320,6 +4768,8 @@ async def ws_terminal(websocket: WebSocket, token: str, host: str) -> None:
                     "device_id": device_id,
                     "output": "" if streamed else output_clean,
                     "prompt": prompt,
+                    "session_gen": runtime.session_gen,
+                    "seq": runtime.next_seq(),
                 }
             )
             await websocket.send_json(
@@ -4330,6 +4780,8 @@ async def ws_terminal(websocket: WebSocket, token: str, host: str) -> None:
                     "status": runtime.status,
                     "latency": latency_ms,
                     "prompt": runtime.prompt,
+                    "session_gen": runtime.session_gen,
+                    "seq": runtime.next_seq(),
                 }
             )
 
@@ -4520,6 +4972,10 @@ async def ws_terminal(websocket: WebSocket, token: str, host: str) -> None:
 
     try:
         while True:
+            # Phase R: If another WebSocket connected for this token, yield cleanly to the owner
+            if _ACTIVE_SOCKETS_BY_TOKEN.get(token) != session_id:
+                break
+
             message = await websocket.receive_json()
             raw_msg_type = message.get("type")
             msg_type = _normalize_ws_msg_type(raw_msg_type)
@@ -4527,14 +4983,28 @@ async def ws_terminal(websocket: WebSocket, token: str, host: str) -> None:
 
             if msg_type == "connect_device":
                 await connect_device(device_id)
+            elif msg_type == "request_enable":
+                await run_command(device_id, "enable")
+            elif msg_type == "cancel_auth":
+                device_id = message.get("device_id", "")
+                active_rt = runtimes.get(device_id) or _DEVICE_RUNTIMES.get((token, device_id))
+                if active_rt:
+                    active_rt.interactive_state = "idle"
+                    if hasattr(active_rt.device, "cancel_enable"):
+                        async with active_rt.lock:
+                            try:
+                                await asyncio.to_thread(active_rt.device.cancel_enable)
+                            except Exception:
+                                pass
             elif msg_type == "auth_credentials":
                 # Bug 7: masked credentials from the UI for a device parked at an
-                # interactive console login. Used in-memory only — never echoed
+                # interactive console login or enable secret. Used in-memory only — never echoed
                 # back, persisted, or logged.
                 await complete_device_auth(
                     device_id,
                     str(message.get("username", "")),
                     str(message.get("password", "")),
+                    stage_type=str(message.get("stage_type", "")),
                 )
             elif msg_type == "ghost_accept":
                 # Phase A usage analytics (local-only, Phase H seed). Additive:
@@ -4692,10 +5162,12 @@ async def ws_terminal(websocket: WebSocket, token: str, host: str) -> None:
                 # it can clear its pong-timeout. Pure liveness — no device I/O.
                 await websocket.send_json({"type": "pong", "ts": message.get("ts")})
             elif msg_type in {"command", "run_fix"}:
-                await run_command(
-                    device_id,
-                    message.get("command", ""),
-                    raw=bool(message.get("raw", False)),
+                _spawn_bg(
+                    run_command(
+                        device_id,
+                        message.get("command", ""),
+                        raw=bool(message.get("raw", False)),
+                    )
                 )
 
             elif msg_type == "confirm_response":
@@ -5029,7 +5501,7 @@ async def ws_terminal(websocket: WebSocket, token: str, host: str) -> None:
                 _trailing_ws = raw_partial != raw_partial.rstrip()
                 partial = _collapsed.rstrip() + (" " if _trailing_ws else "")
                 runtime = runtimes.get(device_id)
-                if runtime and not getattr(runtime, "dead", False) and partial.strip():
+                if runtime and not getattr(runtime, "dead", False):
                     async with runtime.lock:
                         try:
                             # Priority 2: CML-style streaming. Capture only the
@@ -5125,6 +5597,14 @@ async def ws_terminal(websocket: WebSocket, token: str, host: str) -> None:
                                 "capability_suggest", "device_help", "shown",
                                 detail=(partial or "").strip()[:80],
                             )
+                else:
+                    await websocket.send_json({
+                        "type": "device_disconnected",
+                        "device_id": device_id,
+                        "reason": getattr(runtime, "dead_reason", "disconnected") if runtime else "disconnected",
+                        "prompt": "",
+                        "message": "Device disconnected — reconnect to continue",
+                    })
 
             else:
                 log.warning(
@@ -5149,6 +5629,17 @@ async def ws_terminal(websocket: WebSocket, token: str, host: str) -> None:
             _keepalive_task.cancel()
         for task in list(_bg_tasks):
             task.cancel()
+
+        # Socket generation guard: if a newer WebSocket has connected for this token,
+        # do not disconnect the live device runtimes or wipe registrations.
+        if _ACTIVE_WS_BY_TOKEN.get(token) == websocket:
+            _ACTIVE_WS_BY_TOKEN.pop(token, None)
+
+        if _ACTIVE_SOCKETS_BY_TOKEN.get(token) != session_id:
+            return
+
+        _ACTIVE_SOCKETS_BY_TOKEN.pop(token, None)
+
         for runtime in runtimes.values():
             try:
                 await asyncio.to_thread(runtime.device.disconnect)

@@ -125,6 +125,100 @@ class TestSshConnectEndpoint:
         )
         assert resp.status_code == 422
 
+    def test_direct_ssh_connect_registers_direct_mode(self):
+        _clear_state()
+        client = _client()
+        resp = client.post(
+            "/api/ssh/connect",
+            json={
+                "host": "10.10.20.181",
+                "username": "developer",
+                "port": 22,
+                "password": "sandbox-secret-pw",
+                "method": "direct",
+                "label": "Sandbox Switch Cat9k",
+            },
+        )
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["success"] is True
+        token = body["token"]
+        assert body["device"]["label"] == "Sandbox Switch Cat9k"
+        meta = server.DEVICES_BY_TOKEN[token][body["device"]["id"]]
+        assert meta["ssh_method"] == "direct"
+        assert meta["ssh_host"] == "10.10.20.181"
+        assert meta["ssh_port"] == 22
+        assert meta["ssh_console_user"] == "developer"
+        assert meta["console_path"] == "ssh://10.10.20.181:22/developer"
+        assert "sandbox-secret-pw" not in resp.text
+
+    def test_host_port_parsing_extracts_port_without_duplicate(self):
+        _clear_state()
+        client = _client()
+        resp = client.post(
+            "/api/ssh/connect",
+            json={
+                "host": "ssh://10.10.20.181:10022/",
+                "username": "developer",
+                "password": "pw",
+                "method": "direct",
+            },
+        )
+        assert resp.status_code == 200
+        body = resp.json()
+        token = body["token"]
+        meta = server.DEVICES_BY_TOKEN[token][body["device"]["id"]]
+        assert meta["ssh_host"] == "10.10.20.181"
+        assert meta["ssh_port"] == 10022
+        assert ":10022:22" not in meta["console_path"]
+
+    def test_invalid_port_rejected(self):
+        _clear_state()
+        client = _client()
+        resp = client.post(
+            "/api/ssh/connect",
+            json={
+                "host": "10.10.20.181",
+                "username": "developer",
+                "port": 70000,
+                "password": "pw",
+            },
+        )
+        assert resp.status_code == 422
+
+    def test_host_injection_characters_rejected(self):
+        _clear_state()
+        client = _client()
+        for bad_host in ["10.10.20.181; cat /etc/passwd", "host`id`", "host$USER", "host|reboot"]:
+            resp = client.post(
+                "/api/ssh/connect",
+                json={
+                    "host": bad_host,
+                    "username": "developer",
+                    "password": "pw",
+                },
+            )
+            assert resp.status_code == 422, f"Expected 422 for host: {bad_host}"
+
+    def test_session_disconnect_endpoint_cleans_state(self):
+        _clear_state()
+        client = _client()
+        connect_resp = client.post(
+            "/api/ssh/connect",
+            json={
+                "host": "10.10.20.181",
+                "username": "developer",
+                "password": "pw",
+            },
+        )
+        token = connect_resp.json()["token"]
+        assert token in server.SESSIONS
+
+        disc_resp = client.post(f"/api/session/disconnect?token={token}")
+        assert disc_resp.status_code == 200
+        assert disc_resp.json()["success"] is True
+        assert token not in server.SESSIONS
+
 
 class TestSshTransportSelection:
     def test_ssh_meta_selects_ssh_backend(self):

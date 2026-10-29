@@ -35,6 +35,7 @@ from __future__ import annotations
 import logging
 import os
 import re
+import threading
 import time
 
 from cliq.connection.live_device import (
@@ -110,6 +111,50 @@ class ConsoleBusyError(ConnectionError):
     """
 
 
+def parse_host_port(raw_host: str, default_port: int = 22) -> tuple[str, int]:
+    """Parse host and port, stripping schemes, trailing slashes, and extracting :port.
+
+    Handles:
+      - '10.10.20.181' -> ('10.10.20.181', default_port)
+      - '10.10.20.181:22' -> ('10.10.20.181', 22)
+      - 'ssh://10.10.20.181:10022' -> ('10.10.20.181', 10022)
+      - '[fe80::1]:2222' -> ('fe80::1', 2222)
+    """
+    text = (raw_host or "").strip()
+    if not text:
+        return "", default_port
+
+    if "://" in text:
+        text = text.split("://", 1)[1]
+
+    text = text.split("/")[0].split("?")[0].split("#")[0].strip()
+
+    if text.startswith("["):
+        if "]" in text:
+            parts = text[1:].split("]", 1)
+            host = parts[0]
+            rest = parts[1]
+            if rest.startswith(":"):
+                try:
+                    port = int(rest[1:])
+                    return host, port
+                except ValueError:
+                    pass
+            return host, default_port
+        return text.strip("[]"), default_port
+
+    if ":" in text:
+        parts = text.split(":", 1)
+        host = parts[0].strip()
+        try:
+            port = int(parts[1].strip())
+            return host, port
+        except ValueError:
+            return host, default_port
+
+    return text, default_port
+
+
 def build_console_username(user: str, port: str | int) -> str:
     """Compose the terminal-server port-mapped username ``user:port``.
 
@@ -125,19 +170,19 @@ def build_console_username(user: str, port: str | int) -> str:
 
 
 class SSHConsoleDevice:
-    """Drive a real Cisco console through a terminal server over SSH (netmiko).
+    """Drive a real Cisco device directly or through a terminal server over SSH (netmiko).
 
     Parameters
     ----------
-    host:      terminal-server hostname (e.g. ``ts01.example.org``).
-    username:  base SSH username (``operator``) — the console port suffix is
-               appended from ``port_user`` unless already present.
-    password:  SSH password (used in-memory only; NEVER logged/persisted).
-    port_user: console line selector appended to the username (e.g. ``19``).
-    port:      SSH TCP port on the terminal server (default 22).
+    host:        hostname or IP address (e.g. ``10.10.20.181`` or ``ts01.example.org``).
+    username:    SSH username (e.g. ``developer`` or ``operator``).
+    password:    SSH password (used in-memory only; NEVER logged/persisted).
+    port_user:   console line selector (e.g. ``19``) for terminal-server mode.
+    port:        SSH TCP port (default 22).
     device_type: netmiko platform driver (``cisco_ios`` / ``cisco_xe``).
-    secret:    enable secret; defaults to ``password`` (typical for lab gear).
-    timeout:   connect/auth timeout in seconds.
+    secret:      enable secret; defaults to ``password`` (typical for lab gear).
+    timeout:     connect/auth timeout in seconds.
+    method:      ``"direct"`` (direct SSH to device) or ``"terminal_server"``.
     """
 
     def __init__(
@@ -149,20 +194,32 @@ class SSHConsoleDevice:
         port: int = 22,
         device_type: str = "cisco_ios",
         secret: str = "",
-        timeout: int = 30,
+        timeout: int = 20,
+        method: str = "",
     ) -> None:
         if not _NETMIKO_OK:
             raise ImportError("netmiko is not installed. Run: pip install netmiko")
 
-        self.host = host
-        self.port = port
+        clean_host, parsed_port = parse_host_port(host, default_port=int(port) if port else 22)
+        self.host = clean_host
+        self.port = parsed_port
         self.base_username = (username or "").strip()
-        self.port_user = str(port_user).strip()
-        self.console_username = build_console_username(self.base_username, self.port_user)
+        self.port_user = str(port_user).strip() if port_user is not None else ""
+        if method and method.strip():
+            self.method = method.strip().lower()
+        else:
+            self.method = "terminal_server" if self.port_user else "direct"
+
+        if self.method == "terminal_server":
+            self.console_username = build_console_username(self.base_username, self.port_user)
+        else:
+            self.console_username = self.base_username
+
         self.password = password
         self.device_type = device_type or "cisco_ios"
-        self.secret = secret or password
+        self.secret = (secret or "").strip()
         self.timeout = timeout
+        self._lock = threading.RLock()
 
         self._conn = None
         self._connected = False
@@ -179,64 +236,130 @@ class SSHConsoleDevice:
     # ------------------------------------------------------------------
 
     def connect(self) -> None:
-        """SSH to the terminal server, land at the console, enable, identify.
+        """SSH to the device or terminal server, land at prompt, enable, identify."""
+        with self._lock:
+            self._connect_locked()
 
-        Emits the required observability event
-        ``{layer:"connection", op:"ssh_console_connect", ...}`` with credentials
-        redacted (only the host, the port-mapped username, the discovered PID,
-        the capability class and the outcome are recorded).
-        """
+    def _connect_locked(self) -> None:
         st = obs.StageTimer(
             "connection", "ssh_console_connect", detail=self.host,
         )
         log.info(
-            "SSH console connect to %s as %s (port %s) ...",
-            self.host, self.console_username, self.port,
+            "SSH connect to %s:%s as %s (method=%s, driver=%s) ...",
+            self.host, self.port, self.console_username, self.method, self.device_type,
         )
-        try:
-            self._conn = ConnectHandler(
-                # Connect as a RAW terminal server: this SKIPS netmiko's
-                # cisco_ios auto session-setup, whose 'terminal width 511' probe
-                # times out on a console line ("Pattern not detected: 'terminal
-                # width 511'"). We wake the console, detect the base prompt, then
-                # redispatch to cisco_ios for full IOS-XE handling.
-                device_type="terminal_server",
-                host=self.host,
-                port=self.port,
-                username=self.console_username,
-                password=self.password,
-                secret=self.secret,
-                conn_timeout=self.timeout,
-                banner_timeout=self.timeout,
-                auth_timeout=self.timeout,
-                # A console echoes commands unpredictably; disable strict command
-                # echo verification so a slow line can't trip a false timeout.
-                global_cmd_verify=False,
-                global_delay_factor=1,
+
+        if self.method == "direct":
+            try:
+                handler_kwargs = {
+                    "device_type": self.device_type,
+                    "host": self.host,
+                    "port": self.port,
+                    "username": self.base_username,
+                    "password": self.password,
+                    "conn_timeout": self.timeout,
+                    "banner_timeout": self.timeout,
+                    "auth_timeout": self.timeout,
+                    "global_cmd_verify": False,
+                    "fast_cli": False,
+                }
+                if self.secret:
+                    handler_kwargs["secret"] = self.secret
+                with self._lock:
+                    self._conn = ConnectHandler(**handler_kwargs)
+                    if self.secret:
+                        self._conn.secret = self.secret
+            except NetmikoAuthenticationException as exc:
+                st.mark("auth", "error", detail="authentication failed")
+                self._log_connect_outcome(st, "error", stage="auth")
+                raise ConnectionError(
+                    f"Authentication failed for {self.base_username}@{self.host}:{self.port}"
+                ) from exc
+            except NetmikoTimeoutException as exc:
+                st.mark("auth", "error", detail="timeout")
+                self._log_connect_outcome(st, "error", stage="auth")
+                raise ConnectionError(
+                    f"Timeout connecting to {self.host}:{self.port}. "
+                    "Verify device IP, port, and that VPN is connected if required."
+                ) from exc
+            except Exception as exc:
+                st.mark("auth", "error", detail=type(exc).__name__)
+                self._log_connect_outcome(st, "error", stage="auth")
+                raise ConnectionError(
+                    f"Cannot reach device at {self.host}:{self.port}: {exc}"
+                ) from exc
+
+            st.mark("auth", "success", detail="device SSH connected")
+
+            # Disable paging and line-wrapping
+            try:
+                self._conn.send_command_timing("terminal length 0")
+                self._conn.send_command_timing("terminal width 0")
+            except Exception:  # pragma: no cover - width/length best-effort
+                pass
+
+            try:
+                self._conn.set_base_prompt()
+            except Exception:  # pragma: no cover - base prompt best-effort
+                pass
+
+            self._connected = True
+            self._current_prompt = self._read_prompt()
+            st.mark("prompt_ready", "success", detail=self._current_prompt)
+            self._identify_device()
+            st.mark(
+                "identify", "success",
+                detail=f"pid={self.pid or '?'} cap={self._capability_class()}",
             )
+            self._log_connect_outcome(st, "success")
+            log.info(
+                "Direct SSH ready: %s:%s (prompt=%r pid=%r capability=%s)",
+                self.host, self.port, self._current_prompt, self.pid, self._capability_class(),
+            )
+            return
+
+        # Terminal Server Console Mode
+        try:
+            ts_kwargs = {
+                "device_type": "terminal_server",
+                "host": self.host,
+                "port": self.port,
+                "username": self.console_username,
+                "password": self.password,
+                "conn_timeout": self.timeout,
+                "banner_timeout": self.timeout,
+                "auth_timeout": self.timeout,
+                "global_cmd_verify": False,
+                "global_delay_factor": 1,
+            }
+            if self.secret:
+                ts_kwargs["secret"] = self.secret
+            with self._lock:
+                self._conn = ConnectHandler(**ts_kwargs)
+                if self.secret:
+                    self._conn.secret = self.secret
         except NetmikoAuthenticationException as exc:
             st.mark("auth", "error", detail="authentication failed")
             self._log_connect_outcome(st, "error", stage="auth")
             raise ConnectionError(
-                f"Authentication failed for {self.console_username}@{self.host}"
+                f"Authentication failed for {self.console_username}@{self.host}:{self.port}"
             ) from exc
         except NetmikoTimeoutException as exc:
             st.mark("auth", "error", detail="timeout")
             self._log_connect_outcome(st, "error", stage="auth")
             raise ConnectionError(
-                f"Timeout connecting to console {self.host}:{self.port}"
+                f"Timeout connecting to terminal server {self.host}:{self.port}. "
+                "Check host, port, and VPN connectivity."
             ) from exc
         except Exception as exc:
             st.mark("auth", "error", detail=type(exc).__name__)
             self._log_connect_outcome(st, "error", stage="auth")
             raise ConnectionError(
-                f"Cannot reach terminal server {self.host}: {exc}"
+                f"Cannot reach terminal server {self.host}:{self.port}: {exc}"
             ) from exc
         st.mark("auth", "success", detail="terminal server attached")
 
-        # Wake the console line and detect its base prompt. On a terminal server
-        # the console emits nothing until it receives a newline; a busy/occupied
-        # line is surfaced as a distinct, actionable error (not "auth failed").
+        # Wake the console line and detect its base prompt.
         try:
             prompt = self._wake_console()
         except ConsoleBusyError:
@@ -253,21 +376,14 @@ class SSHConsoleDevice:
             ) from exc
         st.mark("prompt_detected", "success", detail=prompt)
 
-        # Upgrade the raw terminal-server session to full IOS-XE handling. Skip
-        # netmiko's auto session-prep (session_prep=False) — its 'terminal width
-        # 511' probe is exactly what fails on a console — and run the equivalent
-        # setup (enable, width, base prompt) explicitly below.
+        # Upgrade raw terminal-server session to target device type
         redispatch(self._conn, device_type=self.device_type, session_prep=False)
         st.mark("redispatch", "success", detail=self.device_type)
 
-        # If the console landed in user EXEC ('Router>'), escalate to enable
-        # ('Router#') so CLIQ starts from a known privileged state. netmiko
-        # handles the enable-password prompt; lab gear reuses the login password.
-        try:
-            if not self._conn.check_enable_mode():
-                self._conn.enable()
-        except Exception as exc:  # pragma: no cover - enable best-effort
-            log.warning("enable failed (continuing in current mode): %s", exc)
+        # Mode preservation: do not run enable or disable automatically on
+        # connect/reattach. CLIQ preserves the device's natural landing mode
+        # ('cat9200>' or 'cat9200#'). Elevation to privileged EXEC occurs only
+        # when explicitly requested (e.g. typing 'enable').
 
         # Stop line-wrapping so output parses cleanly; KEEP native paging (like
         # the CML path). Use *timing* (no prompt-pattern wait) so a slow console
@@ -352,6 +468,8 @@ class SSHConsoleDevice:
         gated OFF. Best-effort: if ``show version`` can't be read the device
         stays capability-permissive (``both``) and the live device decides.
         """
+        if not self.is_connected or not self._conn:
+            return
         try:
             output = self.execute("show version")
         except Exception as exc:  # pragma: no cover - identify is best-effort
@@ -403,10 +521,20 @@ class SSHConsoleDevice:
         CML console proxy does, so this is a clean reconnect that re-identifies
         the device and resumes at its live prompt.
         """
-        log.info("Re-attaching SSH console to %s ...", self.host)
-        self.disconnect()
-        self.connect()
-        return mode_from_prompt(self._current_prompt)
+        with self._lock:
+            log.info("Re-attaching SSH console to %s (id=%s)...", self.host, id(self))
+            if self.is_connected and self._conn is not None:
+                try:
+                    chan = getattr(self._conn, "remote_conn", None)
+                    chan_ok = (chan is None or (not getattr(chan, "closed", False) and not getattr(chan, "eof_received", False)))
+                    if chan_ok and self._conn.is_alive():
+                        log.info("Connection to %s is already healthy; skipping reattach", self.host)
+                        return mode_from_prompt(self._current_prompt)
+                except Exception:
+                    pass
+            self.disconnect()
+            self.connect()
+            return mode_from_prompt(self._current_prompt)
 
     def complete_login(self, username: str, password: str) -> None:
         """Interface parity with the CML path.
@@ -420,13 +548,14 @@ class SSHConsoleDevice:
         )
 
     def disconnect(self) -> None:
-        if self._conn is not None:
-            try:
-                self._conn.disconnect()
-            except Exception:  # pragma: no cover - teardown is best-effort
-                pass
-        self._conn = None
-        self._connected = False
+        with self._lock:
+            if self._conn is not None:
+                try:
+                    self._conn.disconnect()
+                except Exception:  # pragma: no cover - teardown is best-effort
+                    pass
+            self._conn = None
+            self._connected = False
 
     @property
     def is_connected(self) -> bool:
@@ -448,14 +577,26 @@ class SSHConsoleDevice:
 
     def _check_connection(self) -> None:
         """Raise :class:`ConnectionLostError` if the SSH channel appears dead."""
-        if self._conn is None:
-            raise ConnectionLostError("SSH console not connected")
-        try:
-            alive = self._conn.is_alive()
-        except Exception as exc:  # pragma: no cover - is_alive should not raise
-            raise ConnectionLostError(f"SSH console unresponsive: {exc}") from exc
-        if not alive:
-            raise ConnectionLostError("SSH console channel closed")
+        with self._lock:
+            if self._conn is None:
+                raise ConnectionLostError("SSH console not connected")
+            chan = getattr(self._conn, "remote_conn", None)
+            if chan is not None:
+                if getattr(chan, "closed", False) or getattr(chan, "eof_received", False):
+                    self._connected = False
+                    raise ConnectionLostError("SSH console channel closed")
+                transport = getattr(chan, "transport", None)
+                if transport is not None and not transport.is_active():
+                    self._connected = False
+                    raise ConnectionLostError("SSH console transport closed")
+            try:
+                alive = self._conn.is_alive()
+            except Exception as exc:  # pragma: no cover - is_alive should not raise
+                self._connected = False
+                raise ConnectionLostError(f"SSH console unresponsive: {exc}") from exc
+            if not alive:
+                self._connected = False
+                raise ConnectionLostError("SSH console channel closed")
 
     # ------------------------------------------------------------------
     # Command execution — input integrity (Bug N) enforced here
@@ -484,27 +625,30 @@ class SSHConsoleDevice:
         if not self.is_connected:
             raise ConnectionError("Not connected. Call connect() first.")
         command = command.strip()
-        self._check_connection()
-        t0 = time.monotonic()
-        self._audit_send(command + "\r\n", source="execute")
-        try:
-            self._conn.write_channel(command + "\r\n")
-            _raw, output = self._stream_command(command, timeout=60.0)
-        except Exception as exc:
+        with self._lock:
+            self._check_connection()
+            t0 = time.monotonic()
+            self._audit_send(command + "\r\n", source="execute")
+            try:
+                self._conn.write_channel(command + "\r\n")
+                _raw, output = self._stream_command(command, timeout=60.0)
+            except Exception as exc:
+                obs.log_event(
+                    "connection", "run_command", "complete", "error",
+                    transport="ssh_console",
+                    elapsed_ms=(time.monotonic() - t0) * 1000.0,
+                    detail=(command.split() or ["?"])[0],
+                )
+                if isinstance(exc, ConnectionLostError):
+                    raise
+                raise ConnectionError(f"Command failed: {exc}") from exc
             obs.log_event(
-                "connection", "run_command", "complete", "error",
+                "connection", "run_command", "complete", "success",
                 transport="ssh_console",
                 elapsed_ms=(time.monotonic() - t0) * 1000.0,
-                detail=(command.split() or ["?"])[0],
+                detail=(command.split() or ["?"])[0], out_chars=len(output),
             )
-            raise ConnectionError(f"Command failed: {exc}") from exc
-        obs.log_event(
-            "connection", "run_command", "complete", "success",
-            transport="ssh_console",
-            elapsed_ms=(time.monotonic() - t0) * 1000.0,
-            detail=(command.split() or ["?"])[0], out_chars=len(output),
-        )
-        return output
+            return output
 
     def execute_paged(self, command: str, on_chunk=None) -> tuple[str, bool]:
         """Run ``command`` and stream its output CONTINUOUSLY as bytes arrive.
@@ -523,33 +667,30 @@ class SSHConsoleDevice:
         if not self.is_connected:
             raise ConnectionError("Not connected. Call connect() first.")
         command = command.strip()
-        self._check_connection()
-        t0 = time.monotonic()
-        # Plain send → read, EXACTLY like the WORKING CML backend
-        # (CMLConsoleDevice.execute_paged): NO pre-command drain. An earlier
-        # pre-command drain here was discarding the command's OWN fast response
-        # — small/quick commands (e.g. 'show ip dhcp binding') returned before
-        # the drain settled, so their whole output was read-and-thrown-away and
-        # the client saw ''. CML never drains and reads cleanly; mirror that.
-        self._audit_send(command + "\r\n", source="execute_paged")
-        try:
-            self._conn.write_channel(command + "\r\n")
-            _raw, page = self._stream_command(command, on_chunk=on_chunk, timeout=60.0)
-        except Exception as exc:
+        with self._lock:
+            self._check_connection()
+            t0 = time.monotonic()
+            self._audit_send(command + "\r\n", source="execute_paged")
+            try:
+                self._conn.write_channel(command + "\r\n")
+                _raw, page = self._stream_command(command, on_chunk=on_chunk, timeout=60.0)
+            except Exception as exc:
+                obs.log_event(
+                    "connection", "run_command", "complete", "error",
+                    transport="ssh_console",
+                    elapsed_ms=(time.monotonic() - t0) * 1000.0,
+                    detail=(command.split() or ["?"])[0],
+                )
+                if isinstance(exc, ConnectionLostError):
+                    raise
+                raise ConnectionError(f"Command failed: {exc}") from exc
             obs.log_event(
-                "connection", "run_command", "complete", "error",
+                "connection", "run_command", "complete", "success",
                 transport="ssh_console",
                 elapsed_ms=(time.monotonic() - t0) * 1000.0,
-                detail=(command.split() or ["?"])[0],
+                detail=(command.split() or ["?"])[0], out_chars=len(page),
             )
-            raise ConnectionError(f"Command failed: {exc}") from exc
-        obs.log_event(
-            "connection", "run_command", "complete", "success",
-            transport="ssh_console",
-            elapsed_ms=(time.monotonic() - t0) * 1000.0,
-            detail=(command.split() or ["?"])[0], out_chars=len(page),
-        )
-        return page, False
+            return page, False
 
     def pager_send_key(self, key: str) -> tuple[str, bool]:
         """No-op pager for the SSH transport (netmiko handles paging internally).
@@ -574,7 +715,8 @@ class SSHConsoleDevice:
         """
         if not self.is_connected:
             raise ConnectionError("Not connected. Call connect() first.")
-        self._check_connection()
+        with self._lock:
+            self._check_connection()
 
         # IOS distinguishes 'show?' (complete the token) from 'show ?' (list
         # subcommands) purely by trailing whitespace — preserve that intent.
@@ -742,9 +884,15 @@ class SSHConsoleDevice:
         # never followed by '@', so the real caret marker is preserved.
         text = text.replace("^@", "")
         # CRLF -> LF first; then resolve any remaining BARE CR as an in-place
-        # overwrite (keep only what follows the last CR on each visual line).
+        # overwrite (keep only the last non-empty part after CR on each visual line).
         text = text.replace("\r\n", "\n")
-        lines = [ln.split("\r")[-1] if "\r" in ln else ln for ln in text.split("\n")]
+        lines = []
+        for ln in text.split("\n"):
+            if "\r" in ln:
+                parts = [p for p in ln.split("\r") if p]
+                lines.append(parts[-1] if parts else "")
+            else:
+                lines.append(ln)
         # Skip leading blank lines (the NUL/blank noise before the echo).
         idx = 0
         while idx < len(lines) and not lines[idx].strip():
@@ -812,87 +960,68 @@ class SSHConsoleDevice:
 
     def _stream_command(self, command: str, on_chunk=None,
                         timeout: float = 60.0) -> tuple[str, str]:
-        """Continuous raw-channel reader — a DIRECT analogue of the WORKING CML
-        backend's :meth:`CMLConsoleDevice._read_page`.
-
-        The CML console path (which reads/streams cleanly, with no ``^@`` and no
-        re-execute) reads the channel as a continuous stream and breaks the
-        instant an IOS prompt appears on the trailing line — there is NO echo
-        gate, NO idle gate, NO grace window, and NO stale-prompt re-read. This
-        method mirrors that shape exactly so the SSH terminal-server path behaves
-        identically:
-
-        * Read whatever bytes are available (:meth:`read_channel`, the netmiko
-          analogue of CML's ``self._chan.recv``) — if none yet, sleep briefly and
-          poll again, exactly like CML.
-        * Forward each newly-available CLEANED slice to ``on_chunk`` ONCE via a
-          monotonic prefix guard — the identical streaming shape CML
-          ``_read_page`` uses. A byte is forwarded once and never replayed, so no
-          line can repeat.
-        * Break the INSTANT the trailing line is a valid IOS prompt — prompt
-          detection is used ONLY to end the read / gate input, never to trigger a
-          re-read.
-
-        The ONLY SSH-specific delta over CML is a NUL (``^@``) strip at the
-        source: a telnet-style terminal server pads line-ends with NUL, which a
-        pure-SSH CML console never emits. That is a pure removal, not read
-        machinery. A ``--More--`` pager is auto-advanced for parity (paging is
-        disabled at connect, so it is belt-and-suspenders).
-
-        Returns ``(raw, clean_page)``.
-        """
         conn = self._conn
         buf = ""
         streamed = ""
-        # Terminal-server SYNC (SSH-only): the CX terminal server buffers the
-        # PREVIOUS command's response, so the first reads can hand back stale
-        # output ending in an old prompt. We MUST NOT stream that or let its
-        # prompt terminate the read. Gate on THIS command's echo: until it is
-        # seen, discard everything (it belongs to a prior command); once seen,
-        # slice the buffer to start at the command's own output and stream/emit
-        # only from there. CML has no such buffer, so its path stays gate-free.
+        emit_pos = 0
         echo_found = False
-        deadline = time.time() + timeout
+        is_exit_cmd = bool(command and command.strip().lower() in ("exit", "quit", "logout"))
+        is_direct = (self.method == "direct")
+        cmd_l = (command or "").strip().lower()
+        old_prompt = self._current_prompt
+        deadline = time.time() + (5.0 if is_exit_cmd else timeout)
+
         while time.time() < deadline:
             chunk = conn.read_channel()
             if not chunk:
-                # No bytes yet — wait for the stream to advance (identical to CML
-                # recv-loop polling). Emit NOTHING; never re-read a buffer.
-                time.sleep(0.05)
+                # Check channel health if read returned empty
+                chan = getattr(conn, "remote_conn", None)
+                if chan is not None:
+                    if getattr(chan, "closed", False) or getattr(chan, "eof_received", False):
+                        self._connected = False
+                        if is_exit_cmd:
+                            raise ConnectionLostError("SSH session closed by remote host")
+                        raise ConnectionLostError("SSH console channel closed")
+                if hasattr(conn, "is_alive") and not conn.is_alive():
+                    self._connected = False
+                    if is_exit_cmd:
+                        raise ConnectionLostError("SSH session closed by remote host")
+                    raise ConnectionLostError("SSH console channel closed")
+                time.sleep(0.04)
                 continue
-            # Per-byte diagnostic trace of the raw bytes off the SSH channel
-            # BEFORE the NUL strip — gated behind CLIQ_TRACE_BYTES (DEBUG), off
-            # by default so it no longer floods the log.
+
             if _TRACE_BYTES:
                 log.debug(
                     "SSH_RAW_READ: repr=%r hex=%s",
                     chunk, [hex(ord(c)) for c in chunk],
                 )
-            # NUL (^@) strip at the SOURCE — the only SSH delta vs CML, because a
-            # telnet terminal server pads line-ends with NUL that CML never sees.
-            # Pure removal, then the bytes are consumed ONCE and we advance.
             buf += chunk.replace("\x00", "")
-            # Echo sync: until THIS command's echo appears, the buffer is the
-            # PREVIOUS command's stale response — do NOT stream it and do NOT let
-            # its trailing prompt end the read. Once the echo lands, discard the
-            # stale prefix + echo line so only the command's OWN output remains.
+
+            # 1. Echo detection / discard
             if not echo_found:
                 echo_idx = self._find_command_echo(buf, command)
-                if echo_idx is None:
-                    continue
-                echo_found = True
-                buf = buf[echo_idx:]
-                streamed = ""
-            # Forward the new cleaned slice ONCE (monotonic prefix guard) — the
-            # exact streaming shape of CML._read_page. Re-emitting already-sent
-            # bytes is impossible, so a line can never repeat on the display.
-            if on_chunk is not None:
+                if echo_idx is not None:
+                    echo_found = True
+                    buf = buf[echo_idx:]
+                    emit_pos = 0
+                elif is_direct and "\n" in buf:
+                    # In direct SSH, first complete line is the command echo
+                    first_line, rest = buf.split("\n", 1)
+                    first_clean = first_line.replace("\x00", "").replace("^@", "").strip().lower()
+                    if cmd_l in first_clean or not first_clean:
+                        buf = rest
+                    echo_found = True
+                    emit_pos = 0
+                elif not cmd_l:
+                    echo_found = True
+                    emit_pos = 0
+
+            # 2. Incremental streaming: emit clean delta as soon as available
+            if on_chunk is not None and echo_found:
                 clean_now = self._clean_stream(buf, command)
                 if len(clean_now) > len(streamed) and clean_now.startswith(streamed):
                     delta = clean_now[len(streamed):]
                     streamed = clean_now
-                    # Per-byte diagnostic trace of the delta handed to on_chunk
-                    # (SSH_EMIT) — gated behind CLIQ_TRACE_BYTES (DEBUG).
                     if _TRACE_BYTES:
                         log.debug(
                             "SSH_EMIT: repr=%r hex=%s",
@@ -900,21 +1029,75 @@ class SSHConsoleDevice:
                         )
                     try:
                         on_chunk(delta)
-                    except Exception:  # pragma: no cover - streaming best-effort
+                    except Exception:
                         pass
+
+            # 3. Termination / Prompt checks            # 3. Termination / Prompt checks
             stripped = _ANSI_STRIP.sub("", buf).rstrip()
-            # Prompt detection = command finished / gate input. Break the INSTANT
-            # the trailing line is an IOS prompt, exactly like CML._read_page —
-            # no echo gate, no grace, no stale-prompt re-read.
-            last = stripped.split("\n")[-1] if stripped else ""
-            if _PROMPT_RE.search(last):
-                self._current_prompt = last.strip()
+            last = stripped.split("\n")[-1].strip() if stripped else ""
+
+            if is_exit_cmd:
+                # Mode transition on exit (e.g. config -> enable mode)
+                if _PROMPT_RE.search(last) and last != old_prompt:
+                    self._current_prompt = last
+                    return buf, self._clean_stream(buf, command)
+                # Logout banner on terminal server
+                if _PRESS_RETURN_RE.search(stripped):
+                    self._audit_send("\r\n", source="exit_press_return")
+                    conn.write_channel("\r\n")
+                    time.sleep(0.2)
+                    tail = self._read_prompt()
+                    if tail:
+                        self._current_prompt = tail
+                        return buf, self._clean_stream(buf, command)
+            else:
+                if _PROMPT_RE.search(last) and echo_found:
+                    if on_chunk is not None:
+                        clean_now = self._clean_stream(buf, command)
+                        if len(clean_now) > len(streamed) and clean_now.startswith(streamed):
+                            delta = clean_now[len(streamed):]
+                            streamed = clean_now
+                            try:
+                                on_chunk(delta)
+                            except Exception:
+                                pass
+                    self._current_prompt = last.strip()
+                    return buf, self._clean_stream(buf, command)
+
+                if _MORE_RE.search(stripped):
+                    self._audit_send(" ", source="pager.more_key")
+                    conn.write_channel(" ")
+
+        # Loop deadline reached
+        stripped = _ANSI_STRIP.sub("", buf).rstrip()
+        last = stripped.split("\n")[-1].strip() if stripped else ""
+
+        if is_exit_cmd:
+            chan = getattr(conn, "remote_conn", None)
+            if chan is not None and (getattr(chan, "closed", False) or getattr(chan, "eof_received", False)):
+                self._connected = False
+                raise ConnectionLostError("SSH session closed by remote host")
+            if hasattr(conn, "is_alive") and not conn.is_alive():
+                self._connected = False
+                raise ConnectionLostError("SSH session closed by remote host")
+            if _PROMPT_RE.search(last) and last != old_prompt:
+                self._current_prompt = last
                 return buf, self._clean_stream(buf, command)
-            # Auto-advance a --More-- pager (space = next page) for parity so long
-            # output never stalls mid-screen (paging is disabled at connect).
-            if _MORE_RE.search(stripped):
-                self._audit_send(" ", source="pager.more_key")
-                conn.write_channel(" ")
+            self._connected = False
+            raise ConnectionLostError("SSH session closed by remote host")
+
+        if _PROMPT_RE.search(last):
+            self._current_prompt = last
+            return buf, self._clean_stream(buf, command)
+
+        chan = getattr(conn, "remote_conn", None)
+        if chan is not None and (getattr(chan, "closed", False) or getattr(chan, "eof_received", False)):
+            self._connected = False
+            raise ConnectionLostError("SSH console channel closed")
+        if hasattr(conn, "is_alive") and not conn.is_alive():
+            self._connected = False
+            raise ConnectionLostError("SSH console channel closed")
+
         return buf, self._clean_stream(buf, command)
 
     def _audit_send(self, data, source: str, secret: bool = False) -> None:
@@ -948,6 +1131,64 @@ class SSHConsoleDevice:
             )
         except Exception:  # pragma: no cover - auditing must never break I/O
             pass
+
+    def check_enable_mode(self) -> bool:
+        """Return True if the session is currently in privileged EXEC mode ('#')."""
+        with self._lock:
+            if not self.is_connected or not self._conn:
+                return False
+            try:
+                if self._conn.check_enable_mode():
+                    return True
+            except Exception:
+                pass
+            return bool(self._current_prompt and self._current_prompt.strip().endswith("#"))
+
+    def enable(self, secret: str = "") -> bool:
+        """Elevate the session to privileged EXEC mode ('#').
+
+        Parameters
+        ----------
+        secret: Optional enable secret to use (and retain for this session).
+
+        Returns
+        -------
+        True if the session is confirmed in privileged mode ('#').
+
+        Raises
+        ------
+        ConnectionError: if disconnected or if device rejects authentication.
+        ValueError: if no enable secret is available.
+        """
+        with self._lock:
+            if not self.is_connected or not self._conn:
+                raise ConnectionError("Not connected. Call connect() first.")
+
+            # If current prompt already indicates privileged EXEC mode ('#'), return success without calling enable() again
+            if self.check_enable_mode():
+                self._current_prompt = self._read_prompt()
+                return True
+
+            sec = (secret or self.secret or "").strip()
+            if not sec:
+                raise ValueError("No enable secret configured. Enter the enable secret at login to access privileged mode.")
+
+            self.secret = sec
+            self._conn.secret = sec
+            try:
+                self._conn.enable()
+                self._current_prompt = self._read_prompt()
+                if not self.check_enable_mode():
+                    raise ConnectionError("Enable authentication rejected by device.")
+                return True
+            except Exception as exc:
+                try:
+                    self._current_prompt = self._read_prompt()
+                except Exception:
+                    pass
+                clean_err = str(exc).replace(sec, "<redacted>")
+                log.warning("enable failed: %s", clean_err)
+                raise ConnectionError(f"Enable authentication failed: {clean_err}") from exc
 
     # ------------------------------------------------------------------
     # Context manager

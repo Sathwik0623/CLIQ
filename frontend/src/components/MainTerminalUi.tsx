@@ -816,18 +816,32 @@ function AuthPromptDialog(props: {
   label: string;
   message: string;
   retry: boolean;
+  stage?: string;
+  stageType?: string;
   onSubmit: (username: string, password: string) => void;
   onCancel: () => void;
 }) {
+  const isEnable = props.stageType === 'enable' || props.message.toLowerCase().includes('enable');
+  const isPasswordOnly = isEnable || props.stage === 'password';
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
+  const [isSubmitting, setIsSubmitting] = useState(false);
   const userRef = useRef<HTMLInputElement>(null);
+  const passRef = useRef<HTMLInputElement>(null);
+
   useEffect(() => {
-    userRef.current?.focus();
-  }, []);
+    if (isPasswordOnly) {
+      passRef.current?.focus();
+    } else {
+      userRef.current?.focus();
+    }
+  }, [isPasswordOnly]);
+
   const submit = (e: React.FormEvent) => {
     e.preventDefault();
-    props.onSubmit(username, password);
+    if (isSubmitting) return;
+    setIsSubmitting(true);
+    props.onSubmit(isPasswordOnly ? '' : username, password);
   };
   return (
     <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/60">
@@ -838,7 +852,9 @@ function AuthPromptDialog(props: {
       >
         <div className="mb-3 flex items-center gap-2">
           <span className="text-lg">🔐</span>
-          <h2 className="text-sm font-semibold text-slate-100">Authentication required</h2>
+          <h2 className="text-sm font-semibold text-slate-100">
+            {isEnable ? 'Enable Secret Required' : 'Authentication required'}
+          </h2>
         </div>
         <p className={`mb-2 text-xs ${props.retry ? 'text-rose-400' : 'text-slate-400'}`}>
           {props.message}
@@ -846,19 +862,22 @@ function AuthPromptDialog(props: {
         <p className="mb-3 text-[11px] text-slate-500">
           Device: <span className="font-mono text-slate-300">{props.label}</span>
         </p>
-        <label className="mb-2 block text-[11px] font-semibold uppercase tracking-wide text-slate-400">
-          Username
-          <input
-            ref={userRef}
-            value={username}
-            onChange={(e) => setUsername(e.target.value)}
-            autoComplete="off"
-            className="mt-1 w-full rounded border border-slate-600 bg-slate-900 px-2 py-1.5 font-mono text-sm text-slate-100 outline-none focus:border-sky-500"
-          />
-        </label>
+        {!isPasswordOnly && (
+          <label className="mb-2 block text-[11px] font-semibold uppercase tracking-wide text-slate-400">
+            Username
+            <input
+              ref={userRef}
+              value={username}
+              onChange={(e) => setUsername(e.target.value)}
+              autoComplete="off"
+              className="mt-1 w-full rounded border border-slate-600 bg-slate-900 px-2 py-1.5 font-mono text-sm text-slate-100 outline-none focus:border-sky-500"
+            />
+          </label>
+        )}
         <label className="block text-[11px] font-semibold uppercase tracking-wide text-slate-400">
-          Password
+          {isEnable ? 'Enable Secret' : 'Password'}
           <input
+            ref={passRef}
             type="password"
             value={password}
             onChange={(e) => setPassword(e.target.value)}
@@ -876,9 +895,12 @@ function AuthPromptDialog(props: {
           </button>
           <button
             type="submit"
-            className="rounded bg-sky-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-sky-500"
+            disabled={isSubmitting}
+            className={`rounded px-3 py-1.5 text-xs font-semibold text-white ${
+              isSubmitting ? 'bg-sky-800 opacity-60 cursor-not-allowed' : 'bg-sky-600 hover:bg-sky-500'
+            }`}
           >
-            Connect
+            {isSubmitting ? 'Submitting…' : (isEnable ? 'Submit Secret' : (isPasswordOnly ? 'Submit' : 'Connect'))}
           </button>
         </div>
         <p className="mt-3 text-[9px] text-slate-600">
@@ -910,6 +932,7 @@ export default function MainTerminalUi(props: MainTerminalUiProps) {
     insertToTerminal, insertBlock, explain, lightbulbOverlay, closeLightbulb,
     lightbulbAnchor, openLightbulbOverlay,
     authPrompt, submitAuth, cancelAuth,
+    requestEnable,
     reconnectBanners, reconnect,
   } = useTerminalSessions(
     props.host,
@@ -1129,13 +1152,31 @@ export default function MainTerminalUi(props: MainTerminalUiProps) {
           {props.userName && (
             <span className="text-xs text-slate-400">{props.userName}</span>
           )}
+          {activeMetrics?.mode === 'exec' && (
+            <button
+              type="button"
+              onClick={() => requestEnable(props.activeDeviceId)}
+              className="rounded-md bg-amber-500 px-3 py-1 text-xs font-semibold text-white shadow-sm transition-colors hover:bg-amber-600 flex items-center gap-1.5"
+              title="Elevate device session to privileged EXEC mode (cat9200#)"
+            >
+              <span>🔑</span>
+              <span>Enter Privileged Mode</span>
+            </button>
+          )}
+          {activeMetrics?.mode === 'enable' && (
+            <span className="rounded-md bg-sky-100 text-sky-800 px-2.5 py-1 text-xs font-semibold flex items-center gap-1">
+              <span>✓</span>
+              <span>Privileged (#)</span>
+            </span>
+          )}
           {props.onExitTerminal && (
             <button
               onClick={props.onExitTerminal}
-              className="rounded-md bg-rose-600 px-3 py-1 text-xs font-medium text-white transition-colors hover:bg-rose-700"
-              title="Exit terminal and return to lab selection"
+              className="rounded-md bg-rose-600 px-3 py-1 text-xs font-medium text-white transition-colors hover:bg-rose-700 flex items-center gap-1.5 shadow-sm"
+              title="Disconnect session and return to sandbox connection form"
             >
-              Exit Terminal
+              <span aria-hidden>✕</span>
+              <span>Disconnect</span>
             </button>
           )}
         </div>
@@ -1611,7 +1652,9 @@ export default function MainTerminalUi(props: MainTerminalUiProps) {
           label={authPrompt.label}
           message={authPrompt.message}
           retry={authPrompt.retry}
-          onSubmit={(u, p) => submitAuth(authPrompt.deviceId, u, p)}
+          stage={authPrompt.stage}
+          stageType={authPrompt.stageType}
+          onSubmit={(u, p) => submitAuth(authPrompt.deviceId, u, p, authPrompt.stageType)}
           onCancel={() => cancelAuth(authPrompt.deviceId)}
         />
       )}

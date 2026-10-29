@@ -482,15 +482,7 @@ class CMLConsoleDevice:
             buf = self._read_until(timeout=5)
             last_line = _ANSI_STRIP.sub("", buf).rstrip().split("\n")[-1].strip()
 
-        # If in user EXEC mode (>) escalate to privileged
-        if last_line.endswith(">"):
-            log.debug("User EXEC detected - running enable")
-            self._send("enable")
-            buf2 = self._read_until(timeout=5)
-            if _PASSWORD_RE.search(buf2):
-                # Lab devices typically have no enable password
-                self._send("")
-                self._read_until(timeout=5)
+        # User EXEC mode (>) preserved - elevation requires explicit enable command
 
         # Priority 2: do NOT disable paging. 'terminal length 0' force-streams
         # all output, which renders a premature newline/prompt before the body
@@ -580,6 +572,108 @@ class CMLConsoleDevice:
     def current_prompt(self) -> str:
         """Last IOS prompt seen on the channel, e.g. 'Switch#' or 'Switch(config)#'."""
         return self._current_prompt
+
+    def check_enable_mode(self) -> bool:
+        """Check if the console is currently in privileged EXEC mode ('#')."""
+        if self._current_prompt:
+            p = _ANSI_STRIP.sub("", self._current_prompt).strip()
+            return bool(_PRIV_PROMPT_RE.search(p) or p.endswith("#"))
+        return False
+
+    def enable(self, secret: str = "") -> bool:
+        """Elevate the CML console session to privileged EXEC mode ('#').
+
+        Sends 'enable' (if not already waiting at a password prompt), enters the
+        provided secret with secret=True (redacted from audit logs), and verifies
+        that the prompt ends with '#'.
+        """
+        io_lock = getattr(self, "_io_lock", None)
+        if io_lock is None:
+            io_lock = self._io_lock = threading.RLock()
+
+        with io_lock:
+            if not self.is_connected or not self._chan:
+                raise ConnectionError("Not connected. Call connect() first.")
+
+            # If already in privileged EXEC or sub-config mode ending with '#'
+            if self.check_enable_mode():
+                return True
+
+            sec = secret or ""
+
+            # Check if console is already displaying a Password prompt
+            # (e.g. if 'enable' was sent earlier or parked at password)
+            buf = self._drain(timeout=0.3)
+            clean = _ANSI_STRIP.sub("", buf)
+            is_at_password = bool(_PASSWORD_RE.search(clean))
+
+            if not is_at_password:
+                # Send 'enable' command
+                self._audit_send("enable\r\n", source="enable.cmd")
+                # Read response until password prompt or regular prompt
+                buf = self._read_until(timeout=8.0)
+                clean = _ANSI_STRIP.sub("", buf)
+                is_at_password = bool(_PASSWORD_RE.search(clean))
+
+            if is_at_password:
+                # Send the secret with secret=True so it's NEVER logged or echoed
+                self._audit_send(sec + "\r\n", source="enable.password", secret=True)
+                buf_resp = self._read_until(timeout=10.0)
+                clean_resp = _ANSI_STRIP.sub("", buf_resp).rstrip()
+                last_line = clean_resp.split("\n")[-1].strip() if clean_resp else ""
+
+                # Check if prompt now ends with '#'
+                if _PROMPT_RE.search(last_line) and last_line.endswith("#"):
+                    self._current_prompt = last_line
+                    return True
+
+                # If re-prompted with Password or error
+                if (
+                    _PASSWORD_RE.search(last_line)
+                    or "% Bad secrets" in clean_resp
+                    or "% Access denied" in clean_resp
+                    or "% Error in authentication" in clean_resp
+                ):
+                    # Clear out the failed auth attempt so console returns to normal prompt
+                    self._audit_send("\x03\r\n", source="enable.cancel")
+                    time.sleep(0.2)
+                    self._drain(timeout=1.0)
+                    self.probe_prompt(timeout=3.0)
+                    raise ConnectionError("Enable authentication rejected by device.")
+
+                # Check if prompt is still '>'
+                if last_line.endswith(">"):
+                    self._current_prompt = last_line
+                    raise ConnectionError("Enable authentication failed: returned to user EXEC mode.")
+            else:
+                # If IOS did not prompt for password (e.g. device with no enable secret)
+                last_line = clean.split("\n")[-1].strip() if clean else ""
+                if _PROMPT_RE.search(last_line) and last_line.endswith("#"):
+                    self._current_prompt = last_line
+                    return True
+                if "% No password set" in clean:
+                    raise ConnectionError("Enable password is not set on the device.")
+
+            # Fallback probe
+            p = self.probe_prompt(timeout=3.0)
+            if p and p.endswith("#"):
+                return True
+
+            raise ConnectionError("Enable mode could not be verified.")
+
+    def cancel_enable(self) -> None:
+        """Cancel an in-progress enable prompt and return the console to user EXEC."""
+        io_lock = getattr(self, "_io_lock", None)
+        if io_lock is None:
+            io_lock = self._io_lock = threading.RLock()
+        with io_lock:
+            try:
+                self._audit_send("\x03\r\n", source="cancel_enable")
+                time.sleep(0.1)
+                self._drain(timeout=1.0)
+                self.probe_prompt(timeout=3.0)
+            except Exception:
+                pass
 
     # ------------------------------------------------------------------
     # Command execution
@@ -1084,6 +1178,7 @@ class CMLConsoleDevice:
                 # so execute() can re-wake instead of blocking for the timeout.
                 if _PRESS_RETURN_RE.search(stripped):
                     log.debug("_read_until: logout banner detected")
+                    self._current_prompt = ""
                     break
             except socket.timeout:
                 stripped = _ANSI_STRIP.sub("", buf).rstrip()
@@ -1094,6 +1189,7 @@ class CMLConsoleDevice:
                     break
                 if _PRESS_RETURN_RE.search(stripped):
                     log.debug("_read_until(timeout): logout banner detected")
+                    self._current_prompt = ""
                     break
             except Exception as exc:
                 log.debug("_read_until exception: %s", exc)
@@ -1129,6 +1225,10 @@ class CMLConsoleDevice:
         buf = ""
         streamed = ""
         deadline = time.time() + timeout
+        cmd_norm = command.strip().lower() if command else ""
+        echo_cleared = False if cmd_norm else True
+        output_started = False
+        stream_cursor = 0
         while time.time() < deadline:
             try:
                 chunk = self._chan.recv(4096)
@@ -1141,19 +1241,50 @@ class CMLConsoleDevice:
                 if getattr(self, "_read_first_byte_ts", None) is None:
                     self._read_first_byte_ts = time.monotonic()
                 buf += chunk.decode("utf-8", errors="replace")
-                # Phase 3 latency masking: push the new cleaned delta so the web
-                # terminal can render output live as it streams in. Monotonic
-                # prefix guard avoids re-sending or negative deltas if a trailing
-                # line is transiently trimmed by _clean_page.
-                if on_chunk is not None:
-                    clean_now = _clean_page(buf, command)
-                    if len(clean_now) > len(streamed) and clean_now.startswith(streamed):
-                        delta = clean_now[len(streamed):]
-                        streamed = clean_now
-                        try:
-                            on_chunk(delta)
-                        except Exception:
-                            pass
+
+                # Echo discard: wait until the command echo line has completed
+                if not echo_cleared:
+                    if "\n" in buf:
+                        first_nl = buf.find("\n")
+                        first_line = (
+                            _ANSI_STRIP.sub("", buf[:first_nl])
+                            .replace("\r", "")
+                            .replace("\x08", "")
+                            .strip()
+                            .lower()
+                        )
+                        if first_line == cmd_norm or first_line.startswith(cmd_norm) or cmd_norm.startswith(first_line):
+                            stream_cursor = first_nl + 1
+                            echo_cleared = True
+                        else:
+                            stream_cursor = 0
+                            echo_cleared = True
+
+                # Real-time incremental streaming: emit complete output lines live as they arrive.
+                # Trailing incomplete lines (e.g. prompt, --More--, password) are held until newline.
+                if echo_cleared and on_chunk is not None:
+                    unstreamed = buf[stream_cursor:]
+                    if "\n" in unstreamed:
+                        last_nl = unstreamed.rfind("\n")
+                        delta_raw = unstreamed[:last_nl + 1]
+                        stream_cursor += last_nl + 1
+
+                        delta = _ANSI_STRIP.sub("", delta_raw).replace("\x08", "").replace("\r\r\n", "\r\n")
+                        if not output_started:
+                            lines = delta.split("\n")
+                            while lines and not lines[0].strip():
+                                lines.pop(0)
+                            if lines:
+                                output_started = True
+                                delta = "\n".join(lines)
+                            else:
+                                delta = ""
+                        if delta:
+                            try:
+                                on_chunk(delta)
+                            except Exception:
+                                pass
+
                 stripped = _ANSI_STRIP.sub("", buf).rstrip()
                 last = stripped.split("\n")[-1] if stripped else ""
                 if _PROMPT_RE.search(last):
@@ -1167,6 +1298,7 @@ class CMLConsoleDevice:
                 # to get started." banner — signal it so execute_paged() can
                 # re-wake to the user EXEC prompt instead of blocking to timeout.
                 if _PRESS_RETURN_RE.search(stripped):
+                    self._current_prompt = ""
                     return buf, "logout"
                 # Interactive IOS question (e.g. 'configure' -> "[terminal]?").
                 # Only when the caller opted in, so ordinary output never trips
@@ -1182,12 +1314,32 @@ class CMLConsoleDevice:
                 if _MORE_RE.search(stripped):
                     return buf, "more"
                 if _PRESS_RETURN_RE.search(stripped):
+                    self._current_prompt = ""
                     return buf, "logout"
                 if detect_interactive and _INTERACTIVE_PROMPT_RE.search(last):
                     return buf, "input"
             except Exception as exc:
                 log.debug("_read_page exception: %s", exc)
                 break
+
+        if echo_cleared and on_chunk is not None:
+            tail = buf[stream_cursor:]
+            stripped_tail = _ANSI_STRIP.sub("", tail).rstrip()
+            last = stripped_tail.split("\n")[-1].strip() if stripped_tail else ""
+            if (
+                tail
+                and not _PROMPT_RE.search(last)
+                and not _PASSWORD_RE.search(last)
+                and not _MORE_RE.search(stripped_tail)
+                and not _PRESS_RETURN_RE.search(stripped_tail)
+            ):
+                delta = _ANSI_STRIP.sub("", tail).replace("\x08", "").replace("\r\r\n", "\r\n")
+                if delta.strip():
+                    try:
+                        on_chunk(delta)
+                    except Exception:
+                        pass
+
         return buf, "timeout"
 
     def execute_paged(self, command: str, on_chunk=None) -> tuple[str, bool]:
@@ -1224,9 +1376,7 @@ class CMLConsoleDevice:
             # lands back in 'exec' mode immediately instead of the caller waiting
             # out the read timeout for a prompt that never arrives.
             if state == "logout":
-                self._send("")
-                raw2, state = self._read_page(timeout=8, command=command)
-                raw += raw2
+                self._current_prompt = ""
             _t_complete = time.monotonic()
         more = state == "more"
         page = _clean_page(raw, command)
