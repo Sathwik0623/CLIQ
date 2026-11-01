@@ -34,6 +34,7 @@ Design guarantees (Phase A constraints):
 
 from __future__ import annotations
 
+import contextvars
 import json
 import os
 import re
@@ -71,6 +72,13 @@ _LAYER_FILES: dict[str, str] = {
     # VLAN-capability caching, and silent idle reconnects.
     "renderer": "renderer.log",
     "connection": "connection.log",
+    # Phase U.3: Per-user, per-session, per-device structured categories
+    "app": "app.log",
+    "device": "device.log",
+    "websocket": "websocket.log",
+    "pager": "pager.log",
+    "session": "session.log",
+    "metrics": "metrics.log",
 }
 
 #: Rotate a log once it exceeds this size (bytes). Keep ``_MAX_BACKUPS`` copies.
@@ -80,6 +88,38 @@ _MAX_BACKUPS = int(os.environ.get("CLIQ_LOG_MAX_BACKUPS", "3"))
 #: Serializes file writes/rotation so concurrent device threads don't interleave
 #: partial JSON lines into a log file.
 _FILE_LOCK = threading.Lock()
+
+_CURRENT_TRACE_CONTEXT: contextvars.ContextVar[dict[str, Any]] = contextvars.ContextVar(
+    "cliq_trace_context", default={}
+)
+
+
+@contextmanager
+def trace_context(**ctx: Any) -> Iterator[dict[str, Any]]:
+    """Context manager to bind trace context (corr_id, user_id, session_id, lab_id, device_id, etc.)."""
+    curr = dict(_CURRENT_TRACE_CONTEXT.get() or {})
+    for k, v in ctx.items():
+        if v is not None:
+            curr[k] = _REDACTED if _is_secret_key(k) else redact(v)
+    token = _CURRENT_TRACE_CONTEXT.set(curr)
+    try:
+        yield curr
+    finally:
+        _CURRENT_TRACE_CONTEXT.reset(token)
+
+
+def set_trace_context(**ctx: Any) -> None:
+    """Imperatively update the current task's trace context."""
+    curr = dict(_CURRENT_TRACE_CONTEXT.get() or {})
+    for k, v in ctx.items():
+        if v is not None:
+            curr[k] = _REDACTED if _is_secret_key(k) else redact(v)
+    _CURRENT_TRACE_CONTEXT.set(curr)
+
+
+def get_trace_context() -> dict[str, Any]:
+    """Retrieve the current task's trace context."""
+    return dict(_CURRENT_TRACE_CONTEXT.get() or {})
 
 
 def _layer_file(layer: str) -> Path:
@@ -102,6 +142,12 @@ _SECRET_PATTERNS: tuple[re.Pattern[str], ...] = (
     ),
     # "Authorization: Token <value>" / "Bearer <value>" header forms
     re.compile(r"(?i)\b(bearer|token)\s+[A-Za-z0-9._\-]{8,}"),
+    # Cisco enable secret / enable password / password commands
+    re.compile(r"(?i)\b(enable\s+secret(?:\s+\d+)?)\s+\S+"),
+    re.compile(r"(?i)\b(enable\s+password(?:\s+\d+)?)\s+\S+"),
+    re.compile(r"(?i)\b(password(?:\s+\d+)?)\s+\S+"),
+    # Plaintext JWT tokens (header.payload.signature starting with ey)
+    re.compile(r"\bey[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}\b"),
     # Long opaque hex/base64-ish blobs that are almost certainly a key/token.
     # 16+ hex chars; dashed UUIDs (lab/node ids) are NOT matched (dashes break
     # the run) so legitimate identifiers still log.
@@ -136,7 +182,9 @@ def _redact_match(match: re.Match[str]) -> str:
     """Keep the field name (if any) but replace its value with ``<redacted>``."""
     groups = match.groups()
     if groups and groups[0]:
-        return f"{groups[0]}=<redacted>"
+        val = groups[0]
+        sep = "=" if "=" in match.group(0) else (":" if ":" in match.group(0) else " ")
+        return f"{val}{sep}<redacted>"
     return _REDACTED
 
 
@@ -170,6 +218,14 @@ def log_event(
     status_code: Optional[int] = None,
     elapsed_ms: Optional[float] = None,
     detail: Any = "",
+    corr_id: Optional[str] = None,
+    user_id: Optional[str] = None,
+    session_id: Optional[str] = None,
+    lab_id: Optional[str] = None,
+    device_id: Optional[str] = None,
+    device_name: Optional[str] = None,
+    console_session_id: Optional[str] = None,
+    ws_id: Optional[str] = None,
     **extra: Any,
 ) -> dict[str, Any]:
     """Append one unified JSON-line record to the ``layer`` log.
@@ -177,6 +233,7 @@ def log_event(
     Returns the record dict (handy for tests/diagnostics). Never raises — a
     logging failure must never break a connection or a command.
     """
+    ctx = _CURRENT_TRACE_CONTEXT.get() or {}
     record: dict[str, Any] = {
         "ts": _now_iso(),
         "layer": layer,
@@ -187,6 +244,32 @@ def log_event(
         "elapsed_ms": round(elapsed_ms, 1) if elapsed_ms is not None else None,
         "detail": redact(detail) if detail else "",
     }
+    # Trace context identity fields
+    c_id = corr_id or extra.pop("corr_id", None) or ctx.get("corr_id")
+    if c_id:
+        record["corr_id"] = str(c_id)
+    u_id = user_id or extra.pop("user_id", None) or ctx.get("user_id")
+    if u_id:
+        record["user_id"] = redact(u_id)
+    s_id = session_id or extra.pop("session_id", None) or ctx.get("session_id")
+    if s_id:
+        record["session_id"] = str(s_id)
+    l_id = lab_id or extra.pop("lab_id", None) or ctx.get("lab_id")
+    if l_id:
+        record["lab_id"] = str(l_id)
+    d_id = device_id or extra.pop("device_id", None) or ctx.get("device_id")
+    if d_id:
+        record["device_id"] = str(d_id)
+    d_name = device_name or extra.pop("device_name", None) or ctx.get("device_name")
+    if d_name:
+        record["device_name"] = str(d_name)
+    cs_id = console_session_id or extra.pop("console_session_id", None) or ctx.get("console_session_id")
+    if cs_id:
+        record["console_session_id"] = str(cs_id)
+    w_id = ws_id or extra.pop("ws_id", None) or ctx.get("ws_id")
+    if w_id:
+        record["ws_id"] = str(w_id)
+
     if extra:
         # Extra fields are redacted too so no secret can slip in via a kwarg.
         for k, v in extra.items():
@@ -199,6 +282,104 @@ def log_event(
     except Exception:  # noqa: BLE001 - logging must never break the caller
         pass
     return record
+
+
+def log_device_event(
+    device_id: str,
+    op: str,
+    stage: str,
+    outcome: str,
+    *,
+    device_name: str = "",
+    elapsed_ms: Optional[float] = None,
+    detail: Any = "",
+    **extra: Any,
+) -> dict[str, Any]:
+    """Helper for device-lifecycle events written to device.log."""
+    return log_event(
+        "device",
+        op,
+        stage,
+        outcome,
+        device_id=device_id,
+        device_name=device_name or device_id,
+        elapsed_ms=elapsed_ms,
+        detail=detail,
+        **extra,
+    )
+
+
+def log_command_event(
+    device_id: str,
+    command: str,
+    stage: str,
+    outcome: str,
+    *,
+    elapsed_ms: Optional[float] = None,
+    detail: Any = "",
+    **extra: Any,
+) -> dict[str, Any]:
+    """Helper for command execution events written to command.log."""
+    return log_event(
+        "command",
+        "run_command",
+        stage,
+        outcome,
+        device_id=device_id,
+        elapsed_ms=elapsed_ms,
+        detail=detail or command,
+        command=redact(command),
+        **extra,
+    )
+
+
+def log_pager_event(
+    device_id: str,
+    op: str,
+    stage: str,
+    outcome: str,
+    *,
+    key: str = "",
+    elapsed_ms: Optional[float] = None,
+    detail: Any = "",
+    **extra: Any,
+) -> dict[str, Any]:
+    """Helper for pager and help-capture events written to pager.log."""
+    return log_event(
+        "pager",
+        op,
+        stage,
+        outcome,
+        device_id=device_id,
+        elapsed_ms=elapsed_ms,
+        detail=detail or f"key={key!r}",
+        pager_key=key,
+        **extra,
+    )
+
+
+def log_metric(
+    device_id: str,
+    metric_name: str,
+    value: float | int,
+    *,
+    unit: str = "ms",
+    detail: Any = "",
+    **extra: Any,
+) -> dict[str, Any]:
+    """Helper for telemetry and latency records written to metrics.log."""
+    return log_event(
+        "metrics",
+        "metric",
+        metric_name,
+        "recorded",
+        device_id=device_id,
+        metric_name=metric_name,
+        value=value,
+        unit=unit,
+        detail=detail,
+        **extra,
+    )
 
 
 def _write_record(layer: str, record: dict[str, Any]) -> None:
@@ -258,10 +439,11 @@ class StageTimer:
     ``total_ms`` returns the elapsed time since construction at any point.
     """
 
-    def __init__(self, layer: str, op: str, *, detail: Any = ""):
+    def __init__(self, layer: str, op: str, *, detail: Any = "", **context: Any):
         self.layer = layer
         self.op = op
         self._base_detail = detail
+        self._context = context
         self._t0 = time.monotonic()
         self._last = self._t0
 
@@ -278,6 +460,7 @@ class StageTimer:
         now = time.monotonic()
         elapsed_ms = (now - self._last) * 1000.0
         self._last = now
+        combined = {**self._context, **extra}
         log_event(
             self.layer,
             self.op,
@@ -287,7 +470,7 @@ class StageTimer:
             elapsed_ms=elapsed_ms,
             detail=detail or self._base_detail,
             total_ms=round((now - self._t0) * 1000.0, 1),
-            **extra,
+            **combined,
         )
         return elapsed_ms
 
@@ -392,6 +575,62 @@ def event_listener_enabled() -> bool:
     return _flag("CLIQ_CML_EVENTS", default=False)
 
 
+def export_diagnostic_bundle(
+    target_path: Path | str | None = None,
+    log_dir: Path | str | None = None,
+) -> Path:
+    """Export a redacted diagnostic bundle zip, strictly excluding token caches and secrets.
+
+    Excludes:
+      - token_cache.json, *.token_cache*, and session files
+      - Private keys (*.key, *.pem)
+      - Plaintext JWT and credential files
+
+    All text file contents are passed through :func:`redact` before inclusion.
+    """
+    import zipfile
+
+    if log_dir is None:
+        log_dir = Path.home() / ".cliq" / "logs"
+    else:
+        log_dir = Path(log_dir)
+
+    if target_path is None:
+        target_path = Path.home() / ".cliq" / f"cliq-diagnostics-{int(time.time())}.zip"
+    else:
+        target_path = Path(target_path)
+
+    target_path.parent.mkdir(parents=True, exist_ok=True)
+
+    _EXCLUDED_NAMES = {
+        "token_cache.json",
+        "token_cache",
+        ".token_cache",
+        "credentials.json",
+        "secrets.env",
+    }
+    _EXCLUDED_EXTENSIONS = {".key", ".pem", ".jwt", ".p12", ".pfx"}
+
+    with zipfile.ZipFile(target_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        if log_dir.exists():
+            for p in log_dir.rglob("*"):
+                if not p.is_file():
+                    continue
+                name_low = p.name.lower()
+                if name_low in _EXCLUDED_NAMES or p.suffix.lower() in _EXCLUDED_EXTENSIONS:
+                    continue
+                if "token_cache" in name_low:
+                    continue
+                try:
+                    raw_text = p.read_text(encoding="utf-8", errors="replace")
+                    clean_text = redact(raw_text)
+                    zf.writestr(p.name, clean_text)
+                except Exception:
+                    pass
+
+    return target_path
+
+
 __all__ = [
     "CLIQ_HOME",
     "log_event",
@@ -400,4 +639,5 @@ __all__ = [
     "StageTimer",
     "timed",
     "event_listener_enabled",
+    "export_diagnostic_bundle",
 ]

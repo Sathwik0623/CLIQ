@@ -4,6 +4,7 @@ import LabDeviceStep from './components/LabDeviceStep';
 import MainTerminalUi from './components/MainTerminalUi';
 import { postAuth, postDevices, postSshConnect, postDisconnect } from './lib/api';
 import type { Device, Lab, TopologyLink, TopologyNode } from './types/api';
+import { AlertTriangleIcon, CloseIcon } from './components/Icons';
 
 type Stage = 'login' | 'select' | 'terminal';
 
@@ -62,11 +63,30 @@ export default function App() {
       setHost(resolvedHost);
       setToken(data.token);
       setUserName(username);
-      setLabs(data.labs ?? []);
+      const userLabs = data.labs ?? [];
+      setLabs(userLabs);
       // Surface a non-blocking reservation warning when the login proceeded
       // without NetSim verification (unverifiable + 'warn' policy).
       setReservationWarning(data.warning ?? '');
       setUnverifiedSession(data.unverified ?? false);
+
+      if (userLabs.length > 0) {
+        const firstLabId = userLabs[0].id;
+        setSelectedLabId(firstLabId);
+        try {
+          const devData = await postDevices(resolvedHost, data.token, firstLabId);
+          setDevices(devData.devices ?? []);
+          setTopologyNodes(devData.topology?.nodes ?? []);
+          setTopologyLinks(devData.topology?.links ?? []);
+          setOpenDeviceIds(new Set());
+          setActiveDeviceId('');
+          setPrecheckDeviceId(null);
+          setStage('terminal');
+          return;
+        } catch {
+          // Fall back to select stage if auto-device fetch fails
+        }
+      }
       setStage('select');
     } catch (e) {
       // The gate failed closed (non-2xx). Stay on the login page and show the
@@ -107,6 +127,25 @@ export default function App() {
     } finally {
       setLoading(false);
       connectingRef.current = false;
+    }
+  }
+
+  async function handleSelectLab(labId: string) {
+    setSelectedLabId(labId);
+    if (!host || !token) return;
+    setLoading(true);
+    try {
+      const data = await postDevices(host, token, labId);
+      setDevices(data.devices ?? []);
+      setTopologyNodes(data.topology?.nodes ?? []);
+      setTopologyLinks(data.topology?.links ?? []);
+      setOpenDeviceIds(new Set());
+      setActiveDeviceId('');
+      setPrecheckDeviceId(null);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Failed to switch lab');
+    } finally {
+      setLoading(false);
     }
   }
 
@@ -195,23 +234,24 @@ export default function App() {
   }
 
   return (
-    <div className="min-h-screen bg-white">
+    <div className="min-h-screen" style={{ background: 'var(--ide-bg)', color: 'var(--ide-text)' }}>
       {reservationWarning && stage !== 'login' && (
         <div
           role="alert"
-          className="flex items-start justify-between gap-3 border-b-2 border-amber-500 bg-amber-100 px-4 py-3 text-sm text-amber-900"
+          className="flex items-start justify-between gap-3 border-b px-4 py-2 text-xs"
+          style={{ background: '#451a03', borderColor: '#b45309', color: '#fef3c7' }}
         >
           <span className="flex items-start gap-2">
-            <span aria-hidden className="text-lg leading-none">⚠</span>
+            <AlertTriangleIcon size={14} className="text-amber-400 shrink-0 mt-0.5" />
             <span>{reservationWarning}</span>
           </span>
           <button
             type="button"
             onClick={() => setReservationWarning('')}
-            className="shrink-0 rounded px-2 font-semibold text-amber-800 hover:bg-amber-200"
+            className="shrink-0 rounded p-1 font-semibold text-amber-300 hover:bg-amber-900/50"
             aria-label="Dismiss unverified-access warning"
           >
-            ✕
+            <CloseIcon size={12} />
           </button>
         </div>
       )}
@@ -219,7 +259,8 @@ export default function App() {
         <div
           role="status"
           title="CLIQ cannot confirm this reservation is active or expired (no NetSim key). You may be operating an expired lab."
-          className="flex items-center gap-1.5 border-b border-amber-300 bg-amber-50 px-4 py-1 text-xs font-semibold uppercase tracking-wide text-amber-700"
+          className="flex items-center gap-1.5 border-b px-4 py-1 text-[11px] font-semibold uppercase tracking-wide"
+          style={{ background: '#291400', borderColor: '#78350f', color: '#fbbf24' }}
         >
           <span aria-hidden className="inline-block h-2 w-2 rounded-full bg-amber-500" />
           Unverified reservation — may be expired
@@ -255,6 +296,8 @@ export default function App() {
           host={host}
           token={token}
           userName={userName}
+          labs={labs}
+          selectedLabId={selectedLabId}
           labTitle={labTitle}
           labExpiresAt={labExpiresAt}
           precheckDeviceId={precheckDeviceId}
@@ -266,6 +309,7 @@ export default function App() {
           onOpenDevice={openDevice}
           onCloseDevice={closeDevice}
           onSetActiveDevice={setActiveDeviceId}
+          onSelectLab={handleSelectLab}
           onChangeLab={() => setStage('select')}
           onExitTerminal={handleExitTerminal}
         />

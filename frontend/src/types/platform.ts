@@ -22,7 +22,7 @@ export const SANDBOX_PLATFORMS: PlatformOption[] = [
     badge: 'Available',
     badgeColor: 'emerald',
     status: 'available',
-    icon: '⚡',
+    icon: 'direct_ssh',
     supportedDrivers: ['Cisco IOS / IOS-XE', 'Cisco NX-OS', 'Cisco IOS-XR'],
   },
   {
@@ -34,7 +34,7 @@ export const SANDBOX_PLATFORMS: PlatformOption[] = [
     badge: 'Available',
     badgeColor: 'sky',
     status: 'available',
-    icon: '🌐',
+    icon: 'cml',
     supportedDrivers: ['CML Controller REST API', 'Interactive Topology', 'Direct Node Console'],
   },
   {
@@ -46,7 +46,7 @@ export const SANDBOX_PLATFORMS: PlatformOption[] = [
     badge: 'Coming Soon',
     badgeColor: 'amber',
     status: 'coming_soon',
-    icon: '🛡️',
+    icon: 'future_platforms',
     supportedDrivers: ['Palo Alto PAN-OS (Planned)', 'Juniper Junos OS (Planned)'],
   },
 ];

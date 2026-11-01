@@ -25,6 +25,7 @@ import re
 import socket
 import threading
 import time
+import uuid
 
 log = logging.getLogger("cliq.connection.live")
 
@@ -259,6 +260,9 @@ def _clean_page(raw: str, command: str | None = None) -> str:
         cnorm = command.strip().lower()
         if lines and lines[0].strip().lower() == cnorm:
             lines = lines[1:]
+    # Trim trailing blank lines first so lines[-1] is the actual final line
+    while lines and not lines[-1].strip():
+        lines.pop()
     while lines and _PROMPT_RE.search(lines[-1].strip()):
         lines.pop()
     # Trim leading/trailing blank lines but keep internal blanks.
@@ -333,7 +337,7 @@ class CMLConsoleDevice:
     # Connection lifecycle
     # ------------------------------------------------------------------
 
-    def connect(self) -> None:
+    def connect(self, on_stage=None) -> None:
         paramiko = self._paramiko
 
         # Phase A #2: live console cold-start breakdown. The ~10s cold-start is
@@ -342,11 +346,18 @@ class CMLConsoleDevice:
         # unified "cml" log so a real connection shows where the time goes.
         # Measurement only — connection behavior is unchanged.
         st = obs.StageTimer("cml", "console_attach", detail=self.path)
+        corr_id = uuid.uuid4().hex[:8]
+        t0_total = time.perf_counter()
+        log.info("[TIMING] corr=%s device=%s stage=gateway_ssh_start", corr_id, self.path)
+        if on_stage:
+            on_stage("gateway_ssh", f"Establishing gateway connection to {self.gateway}...")
 
         client = paramiko.SSHClient()
         client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
 
         log.info("SSH connect to CML gateway %s as %s ...", self.gateway, self.username)
+        if on_stage:
+            on_stage("cml_auth", f"Authenticating with CML as {self.username}...")
         try:
             client.connect(
                 self.gateway,
@@ -366,7 +377,9 @@ class CMLConsoleDevice:
             raise ConnectionError(
                 f"Cannot reach CML gateway {self.gateway}: {exc}"
             ) from exc
+        t_ssh_done = time.perf_counter()
         st.mark("auth", "success", detail="ssh gateway authenticated")
+        log.info("[TIMING] corr=%s device=%s stage=gateway_ssh_auth_end elapsed_ms=%.1f", corr_id, self.path, (t_ssh_done - t0_total) * 1000)
 
         transport = client.get_transport()
         chan = transport.open_session()
@@ -384,20 +397,49 @@ class CMLConsoleDevice:
         self._chan = chan
 
         # Wait for the CML banner and "consoles>" prompt
-        time.sleep(0.5)
+        t_proxy_start = time.perf_counter()
         banner = self._read_cml_prompt(timeout=8)
         log.debug("CML banner: %r", banner[:200])
 
         # Open the device console
+        if on_stage:
+            on_stage("console_open", f"Opening device console at {self.path}...")
         open_cmd = f"open {self.path}"
         log.info("Sending: %r to CML proxy ...", open_cmd)
         self._send(open_cmd)
 
-        # Wait for the IOS console to initialise.
-        # _read_until now waits for a real IOS prompt (no early CML-banner break),
-        # so the 20s window covers: CML handshake + "Press RETURN" banner + prompt.
-        buf = self._read_until(timeout=20)
+        # Wait for CML proxy to attach to the device console.
+        # Once "Connected to CML terminalserver" appears, if no prompt arrives
+        # within 0.8s, break immediately to wake the device rather than
+        # idling for 20s waiting on a silent console.
+        buf = ""
+        open_deadline = time.time() + 10.0
+        connected_at: float | None = None
+        while time.time() < open_deadline:
+            try:
+                chunk = chan.recv(4096)
+                if chunk:
+                    buf += chunk.decode("utf-8", errors="replace")
+                    clean_chunk = _ANSI_STRIP.sub("", buf)
+                    last_chunk_line = clean_chunk.split("\n")[-1] if clean_chunk else ""
+                    if _PROMPT_RE.search(last_chunk_line):
+                        self._current_prompt = last_chunk_line.strip()
+                        break
+                    if _CML_CONNECTED_RE.search(clean_chunk) and connected_at is None:
+                        connected_at = time.time()
+                elif connected_at is not None and (time.time() - connected_at > 0.8):
+                    break
+                else:
+                    time.sleep(0.05)
+            except socket.timeout:
+                if connected_at is not None and (time.time() - connected_at > 0.8):
+                    break
+            except Exception:
+                break
+
         clean_open = _ANSI_STRIP.sub("", buf)
+        t_proxy_done = time.perf_counter()
+        log.info("[TIMING] corr=%s device=%s stage=cml_proxy_command_end elapsed_ms=%.1f", corr_id, self.path, (t_proxy_done - t_proxy_start) * 1000)
         log.debug("Post-open buf (stripped): %r", clean_open[:300])
 
         # Detect CML rejecting the path (e.g. missing /0 line number)
@@ -416,9 +458,11 @@ class CMLConsoleDevice:
         # at an interactive login/password prompt (NX-OS / console AAA), this
         # raises InteractiveAuthRequired with the channel kept open so the caller
         # can collect credentials and resume via complete_login() (Bug 7).
-        self._wake_and_finalize(buf, st)
+        if on_stage:
+            on_stage("prompt_wait", "Waiting for device prompt...")
+        self._wake_and_finalize(buf, st, corr_id=corr_id, t0_total=t0_total, on_stage=on_stage)
 
-    def _wake_and_finalize(self, buf: str, st) -> None:
+    def _wake_and_finalize(self, buf: str, st, corr_id: str = "", t0_total: float = 0.0, on_stage=None) -> None:
         """Wake the console, detect the prompt, normalize mode, mark ready.
 
         Shared by connect() (initial attach) and complete_login() (resume after
@@ -426,6 +470,12 @@ class CMLConsoleDevice:
         login/password prompt is seen so the credential exchange can be driven
         from the UI instead of silently failing or leaking a blank password.
         """
+        if not corr_id:
+            corr_id = uuid.uuid4().hex[:8]
+        if not t0_total:
+            t0_total = time.perf_counter()
+        t_wake_start = time.perf_counter()
+        log.info("[TIMING] corr=%s device=%s stage=console_readiness_start", corr_id, self.path)
         # Wake loop: handle all device states by sending blank lines until we
         # see a real IOS prompt.  Uses exponential backoff for faster parallel wake.
         #   - Silent after CML attach → first blank wakes the device
@@ -443,6 +493,10 @@ class CMLConsoleDevice:
             if _PROMPT_RE.search(last_line):
                 log.debug("Got IOS prompt: %r", last_line)
                 self._current_prompt = last_line
+                t_prompt = time.perf_counter()
+                log.info("[TIMING] corr=%s device=%s stage=first_prompt prompt=%r elapsed_ms=%.1f total_ms=%.1f", corr_id, self.path, self._current_prompt, (t_prompt - t_wake_start) * 1000, (t_prompt - t0_total) * 1000)
+                if on_stage:
+                    on_stage("ready", f"Device prompt ready: {self._current_prompt}")
                 break
 
             # Bug 7: an interactive login/password prompt means the device wants
@@ -498,6 +552,8 @@ class CMLConsoleDevice:
         self._auth_stage_timer = None
         self._connected = True
         st.mark("prompt_ready", "success", detail=self._current_prompt or "")
+        t_usable = time.perf_counter()
+        log.info("[TIMING] corr=%s device=%s stage=usable_terminal total_ms=%.1f", corr_id, self.path, (t_usable - t0_total) * 1000)
         log.info("CML console ready: %s -> %s (prompt: %r)", self.gateway, self.path, self._current_prompt)
 
     @property
@@ -742,19 +798,19 @@ class CMLConsoleDevice:
             self._current_prompt = last
         return self._current_prompt
 
-    def reattach(self) -> str:
-        """Re-attach to the EXISTING CML console session after CLIQ restarts.
+    def reattach(self, reason: str = "session_reattach", on_stage=None) -> str:
+        """Re-attach to the EXISTING CML console session after CLIQ restarts / client reconnect.
 
-        Unlike connect(), this does NOT normalize the device (no forced 'end'/
-        'enable'/'terminal length'): the console session on the CML side stays
-        alive across SSH drops, so we simply re-open the console proxy path and
-        probe the live prompt to resume in whatever mode the device was left in.
+        Uses fast non-blocking attach detection matching connect() to avoid the
+        10-second blocking timeout.
 
         Returns the detected mode (e.g. 'config-if'). Falls back to a full
         connect() if the console path cannot be re-opened.
         """
         paramiko = self._paramiko
-        log.info("Re-attaching to existing console session %s ...", self.path)
+        log.info("Re-attaching to existing console session %s (reason=%s) ...", self.path, reason)
+        if on_stage:
+            on_stage("gateway_ssh", f"Establishing gateway connection to {self.gateway}...")
 
         for obj in (self._chan, self._client):
             try:
@@ -766,40 +822,93 @@ class CMLConsoleDevice:
         self._client = None
         self._connected = False
 
+        corr_id = uuid.uuid4().hex[:8]
+        t0_total = time.perf_counter()
+        log.info(
+            "[TIMING] corr=%s device=%s stage=gateway_ssh_start is_reattach=true reason=%s",
+            corr_id, self.path, reason,
+        )
+
         try:
             st = obs.StageTimer("cml", "console_reattach", detail=self.path)
+            if on_stage:
+                on_stage("cml_auth", "Authenticating with CML...")
             client = paramiko.SSHClient()
             client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
             client.connect(
                 self.gateway, username=self.username, password=self.password,
                 timeout=self.timeout, look_for_keys=False, allow_agent=False,
             )
+            t_ssh_done = time.perf_counter()
+            st.mark("auth", "success", detail="ssh gateway authenticated")
+            log.info(
+                "[TIMING] corr=%s device=%s stage=gateway_ssh_auth_end is_reattach=true elapsed_ms=%.1f",
+                corr_id, self.path, (t_ssh_done - t0_total) * 1000,
+            )
+
             chan = client.get_transport().open_session()
             chan.get_pty(term="vt100", width=200, height=50)
             chan.invoke_shell()
             chan.settimeout(0.2)  # snappy prompt polling (Bug 4)
             self._client = client
             self._chan = chan
-            st.mark("auth", "success", detail="ssh gateway authenticated")
 
-            time.sleep(0.3)
+            t_proxy_start = time.perf_counter()
             self._read_cml_prompt(timeout=6)
-            self._send(f"open {self.path}")
-            self._read_until(timeout=10)
+            if on_stage:
+                on_stage("console_open", f"Opening device console at {self.path}...")
+            open_cmd = f"open {self.path}"
+            log.info("Sending: %r to CML proxy (reattach) ...", open_cmd)
+            self._send(open_cmd)
+
+            # Fast non-blocking attach detection matching connect()
+            buf = ""
+            open_deadline = time.time() + 8.0
+            connected_at: float | None = None
+            while time.time() < open_deadline:
+                try:
+                    chunk = chan.recv(4096)
+                    if chunk:
+                        buf += chunk.decode("utf-8", errors="replace")
+                        clean_chunk = _ANSI_STRIP.sub("", buf)
+                        last_chunk_line = clean_chunk.split("\n")[-1] if clean_chunk else ""
+                        if _PROMPT_RE.search(last_chunk_line):
+                            self._current_prompt = last_chunk_line.strip()
+                            break
+                        if _CML_CONNECTED_RE.search(clean_chunk) and connected_at is None:
+                            connected_at = time.time()
+                    elif connected_at is not None and (time.time() - connected_at > 0.4):
+                        break
+                    else:
+                        time.sleep(0.04)
+                except socket.timeout:
+                    if connected_at is not None and (time.time() - connected_at > 0.4):
+                        break
+                    break
+
+            clean_open = _ANSI_STRIP.sub("", buf)
+            t_proxy_done = time.perf_counter()
+            log.info(
+                "[TIMING] corr=%s device=%s stage=cml_proxy_command_end is_reattach=true elapsed_ms=%.1f",
+                corr_id, self.path, (t_proxy_done - t_proxy_start) * 1000,
+            )
+
+            if _CML_UNKNOWN_RE.search(clean_open) or (
+                not _CML_CONNECTED_RE.search(clean_open) and "consoles>" in clean_open
+            ):
+                st.mark("console_open", "error", detail="CML rejected path")
+                raise ConnectionError(f"CML rejected path '{self.path}' during re-attach.")
             st.mark("console_open", "success", detail="console proxy re-attached")
 
-            self._connected = True
-            prompt = self.probe_prompt(timeout=6)
-            if not prompt:
-                # The console may be at a "Press RETURN" banner — nudge once.
-                prompt = self.probe_prompt(timeout=6)
-            mode = mode_from_prompt(prompt)
-            st.mark("prompt_ready", "success", detail=prompt or "")
-            log.info("Re-attached: %s (prompt=%r, mode=%s)", self.path, prompt, mode)
+            if on_stage:
+                on_stage("prompt_wait", "Waiting for device prompt...")
+            self._wake_and_finalize(buf, st, corr_id=corr_id, t0_total=t0_total, on_stage=on_stage)
+            mode = mode_from_prompt(self._current_prompt)
+            log.info("Re-attached: %s (prompt=%r, mode=%s)", self.path, self._current_prompt, mode)
             return mode
         except Exception as exc:
             log.warning("Re-attach failed (%s); doing a full connect.", exc)
-            self.connect()
+            self.connect(on_stage=on_stage)
             return mode_from_prompt(self._current_prompt)
 
     def execute(self, command: str) -> str:
@@ -898,8 +1007,8 @@ class CMLConsoleDevice:
                         if _MORE_RE.search(_ANSI_STRIP.sub("", buf)):
                             return buf, "more"
                         continue
-                time.sleep(0.05)
-                if buf and (time.time() - last_data) >= 0.5:
+                time.sleep(0.04)
+                if buf and (time.time() - last_data) >= 0.16:
                     return buf, "prompt"
             except Exception:
                 break
@@ -995,7 +1104,7 @@ class CMLConsoleDevice:
         with io_lock:
             self._check_connection()
             self._audit_send(key, source="context_help.more_key")
-            if key == "q":
+            if key == "q" or key == "\x03":
                 # Quit the pager, then clear the re-displayed partial line.
                 raw, _ = self._read_help_page(timeout=4.0)
                 self._clear_help_line()
@@ -1014,7 +1123,7 @@ class CMLConsoleDevice:
     def _drain(self, timeout: float = 3.0) -> str:
         """Read whatever is available until the channel goes idle."""
         buf = ""
-        idle = 0.0
+        quiet = 0.0
         deadline = time.time() + timeout
         while time.time() < deadline:
             try:
@@ -1022,11 +1131,11 @@ class CMLConsoleDevice:
                     chunk = self._chan.recv(4096)
                     if chunk:
                         buf += chunk.decode("utf-8", errors="replace")
-                        idle = 0.0
+                        quiet = 0.0
                         continue
-                idle += 0.1
-                time.sleep(0.1)
-                if idle >= 0.5 and buf:
+                time.sleep(0.04)
+                quiet += 0.04
+                if quiet >= 0.16:
                     break
             except Exception:
                 break
@@ -1267,7 +1376,24 @@ class CMLConsoleDevice:
                     if "\n" in unstreamed:
                         last_nl = unstreamed.rfind("\n")
                         delta_raw = unstreamed[:last_nl + 1]
-                        stream_cursor += last_nl + 1
+
+                        # Prompt boundary guard: never stream trailing prompt lines in delta chunks.
+                        # The authoritative prompt is rendered by the final device_output.
+                        clean_test = _ANSI_STRIP.sub("", delta_raw).replace("\x08", "").replace("\r\r\n", "\r\n")
+                        d_lines = clean_test.split("\n")
+                        if len(d_lines) >= 2 and (
+                            _PROMPT_RE.search(d_lines[-2].strip())
+                            or _PASSWORD_RE.search(d_lines[-2].strip())
+                        ):
+                            prompt_str = d_lines[-2].strip()
+                            p_idx = unstreamed.rfind(prompt_str)
+                            if p_idx >= 0:
+                                delta_raw = unstreamed[:p_idx]
+                                stream_cursor += p_idx
+                            else:
+                                stream_cursor += last_nl + 1
+                        else:
+                            stream_cursor += last_nl + 1
 
                         delta = _ANSI_STRIP.sub("", delta_raw).replace("\x08", "").replace("\r\r\n", "\r\n")
                         if not output_started:
@@ -1280,6 +1406,16 @@ class CMLConsoleDevice:
                             else:
                                 delta = ""
                         if delta:
+                            d_lines2 = delta.split("\n")
+                            while d_lines2 and not d_lines2[-1].strip():
+                                d_lines2.pop()
+                            while d_lines2 and (
+                                _PROMPT_RE.search(d_lines2[-1].strip())
+                                or _PASSWORD_RE.search(d_lines2[-1].strip())
+                            ):
+                                d_lines2.pop()
+                            delta = "\n".join(d_lines2)
+                        if delta and delta.strip():
                             try:
                                 on_chunk(delta)
                             except Exception:

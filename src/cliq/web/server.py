@@ -263,6 +263,16 @@ _DEVICE_RUNTIMES: dict[tuple[str, str], "DeviceRuntime"] = {}
 _SESSION_LAST_SEEN: dict[str, float] = {}
 _ACTIVE_SOCKETS_BY_TOKEN: dict[str, str] = {}
 _ACTIVE_WS_BY_TOKEN: dict[str, Any] = {}
+_DEVICE_CONNECT_LOCKS: dict[tuple[str, str], asyncio.Lock] = {}
+
+
+def _get_device_connect_lock(token: str, device_id: str) -> asyncio.Lock:
+    key = (token, device_id)
+    lock = _DEVICE_CONNECT_LOCKS.get(key)
+    if lock is None:
+        lock = asyncio.Lock()
+        _DEVICE_CONNECT_LOCKS[key] = lock
+    return lock
 
 
 # Shared read-only intelligence stack.
@@ -404,8 +414,8 @@ def _init_advisory_stack() -> None:
             except Exception as ex:
                 log.warning("Could not verify KB stats: %s", ex)
         else:
-            log.warning(
-                "Phase 6 KB not found (%s / %s) — advisory endpoints will return fallback.",
+            log.info(
+                "Advisory services: Phase 6 KB/vector store not configured (%s / %s) — terminal services fully available.",
                 _KB_DB, _VEC_DB,
             )
         _validator = SafetyValidator()
@@ -570,13 +580,16 @@ def _build_ghost_index() -> None:
     # tier 0/1 — unified KB (doc_source marks PDF-extracted document commands).
     try:
         import sqlite3
-        conn = sqlite3.connect(_KB_DB)
-        for command, doc_source in conn.execute(
-            "SELECT command, doc_source FROM commands"
-        ):
-            tier = 1 if str(doc_source or "").lower().endswith(".pdf") else 0
-            idx.add(command, tier)
-        conn.close()
+        if Path(_KB_DB).exists():
+            conn = sqlite3.connect(_KB_DB)
+            for command, doc_source in conn.execute(
+                "SELECT command, doc_source FROM commands"
+            ):
+                tier = 1 if str(doc_source or "").lower().endswith(".pdf") else 0
+                idx.add(command, tier)
+            conn.close()
+        else:
+            log.info("Ghost index: KB file %s not found (advisory knowledge base optional).", _KB_DB)
     except Exception as exc:
         log.warning("Ghost index: KB load failed: %s", exc)
     # tier 0 — legacy canonical command set (abbreviation-friendly base).
@@ -3052,8 +3065,16 @@ async def ws_terminal(websocket: WebSocket, token: str, host: str) -> None:
     # Phase R: Close any prior active WebSocket for this token to prevent concurrent duplicate sessions
     prior_ws = _ACTIVE_WS_BY_TOKEN.get(token)
     if prior_ws and prior_ws != websocket:
+        async def _safe_close_superseded(ws_to_close: WebSocket) -> None:
+            try:
+                await ws_to_close.close(code=1000, reason="Superseded by new connection")
+            except (WebSocketDisconnect, RuntimeError, asyncio.CancelledError):
+                pass
+            except Exception as exc:
+                log.debug("safe_close_superseded error: %s", exc)
+
         try:
-            asyncio.create_task(prior_ws.close(code=1000, reason="Superseded by new connection"))
+            asyncio.create_task(_safe_close_superseded(prior_ws))
         except Exception:
             pass
     _ACTIVE_WS_BY_TOKEN[token] = websocket
@@ -3089,7 +3110,14 @@ async def ws_terminal(websocket: WebSocket, token: str, host: str) -> None:
     _keepalive_task: asyncio.Task | None = None
 
     def _spawn_bg(coro) -> asyncio.Task:
-        task = asyncio.create_task(coro)
+        async def _safe_bg():
+            try:
+                await coro
+            except (asyncio.CancelledError, WebSocketDisconnect):
+                pass
+            except Exception as e:
+                log.debug("bg task error: %s", e)
+        task = asyncio.create_task(_safe_bg())
         _bg_tasks.add(task)
         task.add_done_callback(_bg_tasks.discard)
         return task
@@ -3314,14 +3342,17 @@ async def ws_terminal(websocket: WebSocket, token: str, host: str) -> None:
         tick to avoid contending with live I/O; a device already flagged dead is left
         released until the operator reconnects.
         """
-        while True:
-            await asyncio.sleep(_KEEPALIVE_INTERVAL_S)
-            for device_id, runtime in list(runtimes.items()):
-                if runtime.lock.locked():
-                    continue  # device is mid-command; its own path keeps it warm
-                if runtime.dead:
-                    continue  # already released — wait for an operator reconnect
-                await _run_session_health_check(device_id, runtime)
+        try:
+            while True:
+                await asyncio.sleep(_KEEPALIVE_INTERVAL_S)
+                for device_id, runtime in list(runtimes.items()):
+                    if runtime.lock.locked():
+                        continue  # device is mid-command; its own path keeps it warm
+                    if runtime.dead:
+                        continue  # already released — wait for an operator reconnect
+                    await _run_session_health_check(device_id, runtime)
+        except asyncio.CancelledError:
+            pass
 
     def _ensure_keepalive() -> None:
         """Start the keepalive loop once, after the first device connects."""
@@ -3329,7 +3360,7 @@ async def ws_terminal(websocket: WebSocket, token: str, host: str) -> None:
         if _keepalive_task is None or _keepalive_task.done():
             _keepalive_task = asyncio.create_task(_keepalive_loop())
 
-    async def connect_device(device_id: str) -> None:
+    async def _connect_device_locked(device_id: str) -> None:
         dev_map = DEVICES_BY_TOKEN.get(token, {})
         meta = dev_map.get(device_id)
         if not meta:
@@ -3364,6 +3395,12 @@ async def ws_terminal(websocket: WebSocket, token: str, host: str) -> None:
             if hasattr(existing.device, "_conn") and existing.device._conn:
                 try:
                     is_alive = existing.device._conn.is_alive()
+                except Exception:
+                    is_alive = False
+            elif hasattr(existing.device, "_chan") and existing.device._chan:
+                try:
+                    chan = existing.device._chan
+                    is_alive = chan is not None and not getattr(chan, "closed", False)
                 except Exception:
                     is_alive = False
             if is_alive:
@@ -3479,14 +3516,35 @@ async def ws_terminal(websocket: WebSocket, token: str, host: str) -> None:
                 )
                 return
 
-        # Phase 3 latency masking: the SSH console attach below blocks for ~10s.
-        # Tell the client immediately so it can show a "Connecting…" state
+        loop = asyncio.get_running_loop()
+        label = meta.get("label", device_id)
+
+        def on_stage(stage: str, message: str) -> None:
+            try:
+                asyncio.run_coroutine_threadsafe(
+                    websocket.send_json(
+                        {
+                            "type": "device_connecting_stage",
+                            "device_id": device_id,
+                            "label": label,
+                            "stage": stage,
+                            "message": message,
+                        }
+                    ),
+                    loop,
+                )
+            except Exception:
+                pass
+
+        # Phase 3 latency masking: the SSH console attach below blocks for ~4-10s.
+        # Tell the client immediately so it can show in-terminal connection progress
         # instead of a frozen/blank terminal during the attach. UX only.
         await websocket.send_json(
             {
                 "type": "device_connecting",
                 "device_id": device_id,
-                "label": meta.get("label", device_id),
+                "label": label,
+                "message": f"Connecting to {label} console...",
             }
         )
 
@@ -3540,7 +3598,10 @@ async def ws_terminal(websocket: WebSocket, token: str, host: str) -> None:
         # a CML session once the reservation gate above confirmed it is active.
         try:
             if prior:
-                await asyncio.to_thread(device.reattach)
+                import inspect
+                sig = inspect.signature(device.reattach)
+                reattach_kwargs = {"on_stage": on_stage} if "on_stage" in sig.parameters else {}
+                await asyncio.to_thread(device.reattach, **reattach_kwargs)
                 if connection_type != "ssh" and session.auth is not None:
                     # The reservation gate above confirmed 'active' before this
                     # console auth ran — record the gated re-attach outcome.
@@ -3550,7 +3611,10 @@ async def ws_terminal(websocket: WebSocket, token: str, host: str) -> None:
                         reason="reservation_active", detail=device_id,
                     )
             else:
-                await asyncio.to_thread(device.connect)
+                import inspect
+                sig = inspect.signature(device.connect)
+                connect_kwargs = {"on_stage": on_stage} if "on_stage" in sig.parameters else {}
+                await asyncio.to_thread(device.connect, **connect_kwargs)
         except InteractiveAuthRequired as exc:
             # Bug 7: the console is parked at a login/password prompt. Keep the
             # channel open, remember the context, and ask the UI to collect
@@ -3592,6 +3656,15 @@ async def ws_terminal(websocket: WebSocket, token: str, host: str) -> None:
             return
 
         await _finalize_connection(device, device_id, meta, log_key, prior)
+
+    async def connect_device(device_id: str) -> None:
+        """Concurrency-safe per-device connect entry point.
+        Serializes multiple in-flight connects for the same (token, device_id)
+        so duplicate requests share a single connection initialization.
+        """
+        lock = _get_device_connect_lock(token, device_id)
+        async with lock:
+            await _connect_device_locked(device_id)
 
     async def _finalize_connection(device, device_id, meta, log_key, prior) -> None:
         """Register a freshly-attached (and authenticated) device and tell the UI.
@@ -4211,10 +4284,13 @@ async def ws_terminal(websocket: WebSocket, token: str, host: str) -> None:
                 runtime.pager_active = False
                 runtime.mode = _parse_mode(prompt)
                 runtime.prompt = prompt
+                clean_raw_out = output or ""
+                if clean_raw_out and prompt and clean_raw_out.rstrip().endswith(prompt):
+                    clean_raw_out = clean_raw_out.rstrip()[:-len(prompt)].rstrip()
                 await websocket.send_json(
                     {
                         "type": "device_output", "device_id": device_id,
-                        "output": "" if streamed else (output or ""),
+                        "output": "" if streamed else clean_raw_out,
                         "prompt": prompt,
                     }
                 )
@@ -4787,6 +4863,8 @@ async def ws_terminal(websocket: WebSocket, token: str, host: str) -> None:
 
             # Persist to durable memory: command history + resumed mode so a
             # later reconnect restores both.
+            runtime.command_count = getattr(runtime, "command_count", 0) + 1
+            obs.log_command_event(device_id, exec_cmd, "complete", "success", elapsed_ms=latency_ms)
             SESSION_LOG.append_command(log_key, exec_cmd)
             SESSION_LOG.save_state(
                 log_key, meta.get("lab_id", ""), device_id,
@@ -5182,20 +5260,27 @@ async def ws_terminal(websocket: WebSocket, token: str, host: str) -> None:
                 # CML standard: space = next page, enter = next line, q = quit.
                 # Tab is ALSO a quit shortcut (convenience): it exits paging just
                 # like q, so the engineer can bail out of a long output fast.
-                runtime = runtimes.get(device_id)
-                if not runtime or not runtime.pager_active:
+                runtime = runtimes.get(device_id) or _DEVICE_RUNTIMES.get((token, device_id))
+                if not runtime:
                     continue
+                if device_id not in runtimes:
+                    runtimes[device_id] = runtime
+                if not runtime.pager_active:
+                    continue
+                runtime.pager_interactions = getattr(runtime, "pager_interactions", 0) + 1
                 logical = str(message.get("key", "space")).strip().lower()
                 raw_key = {
                     "space": " ", " ": " ",
                     "enter": "\r", "return": "\r", "\r": "\r", "\n": "\r",
                     "q": "q", "quit": "q", "tab": "q", "\t": "q",
+                    "ctrl+c": "q", "ctrl-c": "q", "\x03": "q", "c": "q",
                 }.get(logical, " ")
 
                 # ── Streaming '?'-help pager (Priority 1+2) ────────────────
                 # Help paging streams device_help pages; tokens from each page
                 # are merged into the ghost cache so completion keeps improving.
                 if runtime.help_paging:
+                    t0_help = time.perf_counter()
                     async with runtime.lock:
                         try:
                             page, more = await asyncio.to_thread(
@@ -5205,22 +5290,34 @@ async def ws_terminal(websocket: WebSocket, token: str, host: str) -> None:
                             runtime.help_paging = False
                             runtime.pager_active = False
                             log.warning("help pager error: %s", exc)
+                            prompt = runtime.device.current_prompt or runtime.prompt or f"{device_id}#"
                             await websocket.send_json({
                                 "type": "device_help", "device_id": device_id,
                                 "partial": runtime.help_partial, "output": "",
-                                "more": False, "prompt": runtime.prompt,
+                                "more": False, "prompt": prompt,
+                                "helpComplete": True,
                             })
                             continue
+                        elapsed_ms = round((time.perf_counter() - t0_help) * 1000, 1)
                         _cache_device_help(
                             device_id, runtime.help_partial, page, extend=True,
                             mode=runtime.mode, node_type=runtime.node_type,
                         )
                         runtime.help_paging = more
                         runtime.pager_active = more
+                        prompt = runtime.device.current_prompt or runtime.prompt or f"{device_id}#"
+                        runtime.prompt = prompt
+                        obs.log_pager_event(
+                            device_id, "help_more", "advance" if more else "complete",
+                            "more" if more else "done",
+                            key=logical, elapsed_ms=elapsed_ms,
+                            detail=f"chars={len(page)} more={more}",
+                        )
                     await websocket.send_json({
                         "type": "device_help", "device_id": device_id,
                         "partial": runtime.help_partial, "output": page,
-                        "more": more, "prompt": runtime.prompt,
+                        "more": more, "prompt": prompt,
+                        "helpComplete": not more,
                     })
                     continue
 
@@ -5232,14 +5329,22 @@ async def ws_terminal(websocket: WebSocket, token: str, host: str) -> None:
                         )
                     except Exception as exc:
                         runtime.pager_active = False
+                        prompt = runtime.device.current_prompt or runtime.prompt or f"{device_id}#"
                         await websocket.send_json({
                             "type": "pager_done", "device_id": device_id,
-                            "prompt": runtime.prompt, "mode": runtime.mode,
+                            "prompt": prompt, "mode": runtime.mode,
                         })
                         log.warning("pager_key error: %s", exc)
                         continue
                     latency_ms = round((time.perf_counter() - t0) * 1000)
-                    prompt = runtime.device.current_prompt or runtime.prompt
+                    prompt = runtime.device.current_prompt or runtime.prompt or f"{device_id}#"
+
+                    obs.log_pager_event(
+                        device_id, "native_pager", "advance" if more else "complete",
+                        "more" if more else "done",
+                        key=logical, elapsed_ms=latency_ms,
+                        detail=f"chars={len(page or '')} more={more}",
+                    )
 
                     if more:
                         await websocket.send_json({
@@ -5674,6 +5779,8 @@ def _release_socket_registrations(token: str) -> None:
     """
     for key in [k for k in _DEVICE_RUNTIMES if k[0] == token]:
         _DEVICE_RUNTIMES.pop(key, None)
+    for key in [k for k in _DEVICE_CONNECT_LOCKS if k[0] == token]:
+        _DEVICE_CONNECT_LOCKS.pop(key, None)
     for path, owner in list(_CONSOLE_LOCKS.items()):
         if owner == token:
             _CONSOLE_LOCKS.pop(path, None)

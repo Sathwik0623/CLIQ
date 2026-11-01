@@ -269,7 +269,8 @@ export type WsInbound =
   // notice over the EXISTING channel — surfaced in the same terminal.
   | { type: 'session_expired'; device_id: string; reason: string; prompt_last_seen?: string; message?: string; session_gen?: string; seq?: number }
   // Phase 3 latency masking: console attach in progress (~10s) / live output stream
-  | { type: 'device_connecting'; device_id: string; label?: string }
+  | { type: 'device_connecting'; device_id: string; label?: string; message?: string }
+  | { type: 'device_connecting_stage'; device_id: string; label?: string; stage: string; message: string }
   | { type: 'device_stream'; device_id: string; chunk: string }
   | { type: 'ghost_text'; device_id: string; text: string; seq?: number }
   // Native --More-- pager (Space=page, Enter=line, q=quit)
@@ -322,7 +323,7 @@ export type WsOutbound =
   | { type: 'explain'; device_id: string; command: string; platform?: string; mode?: string }
   | { type: 'device_help'; device_id: string; partial: string }
   // Bug 4: client-side render-order telemetry (forwarded to observability).
-  | { type: 'client_event'; device_id: string; layer: string; op: string; outcome: string; detail?: string }
+  | { type: 'client_event'; device_id: string; layer: string; op: string; outcome: string; stage?: string; detail?: string }
   // Bug 7: masked credentials for a parked interactive console login.
   | { type: 'auth_credentials'; device_id: string; username: string; password: string; stage_type?: string }
   // In-session reconnect heartbeat: periodic client liveness ping (echoed as pong).

@@ -442,12 +442,37 @@ class CMLAuthManager:
         # ── Links ────────────────────────────────────────────────────
         links_out = []
 
+        # Interface label mapping (resolves CML interface UUIDs to human names like Gi0/0)
+        interfaces_map: dict[str, str] = {}
+        try:
+            intf_resp = self._get(f"/labs/{lab_id}/interfaces").json()
+            if isinstance(intf_resp, dict):
+                intf_items = intf_resp.values()
+            elif isinstance(intf_resp, list):
+                intf_items = intf_resp
+            else:
+                intf_items = []
+            for item in intf_items:
+                if isinstance(item, dict):
+                    iid = str(item.get("id") or item.get("interface_id") or "")
+                    lbl = str(item.get("label") or item.get("name") or "")
+                    if iid and lbl:
+                        interfaces_map[iid] = lbl
+        except Exception:
+            pass
+
         def _first_value(payload: dict, keys: list[str]) -> str:
             for key in keys:
                 value = payload.get(key)
                 if value not in (None, ""):
                     return str(value)
             return ""
+
+        def _is_uuid(val: str) -> bool:
+            if not val:
+                return False
+            v = val.strip()
+            return bool(re.match(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", v, re.I)) or bool(re.match(r"^[0-9a-f]{8,}$", v, re.I))
 
         try:
             link_ids = self._get(f"/labs/{lab_id}/links").json()
@@ -456,21 +481,43 @@ class CMLAuthManager:
             for lid in link_ids:
                 try:
                     lk = self._get(f"/labs/{lab_id}/links/{lid}").json()
-                    source_intf = _first_value(lk, [
+                    raw_src = _first_value(lk, [
                         "node_a_intf", "interface_a", "intf_a", "a_intf",
                         "source_interface", "source_port", "n1_intf", "i1",
                     ])
-                    target_intf = _first_value(lk, [
+                    raw_tgt = _first_value(lk, [
                         "node_b_intf", "interface_b", "intf_b", "b_intf",
                         "target_interface", "target_port", "n2_intf", "i2",
                     ])
+
+                    # Resolve interface UUIDs to real interface names if known
+                    source_intf = interfaces_map.get(raw_src, raw_src)
+                    target_intf = interfaces_map.get(raw_tgt, raw_tgt)
+
+                    clean_src = "" if _is_uuid(source_intf) else source_intf
+                    clean_tgt = "" if _is_uuid(target_intf) else target_intf
+
+                    raw_label = str(lk.get("label") or "")
+                    is_raw_uuid = raw_label == lid or _is_uuid(raw_label)
+
+                    if not is_raw_uuid and raw_label:
+                        link_label = raw_label
+                    elif clean_src and clean_tgt:
+                        link_label = f"{clean_src} <-> {clean_tgt}"
+                    elif clean_src:
+                        link_label = clean_src
+                    elif clean_tgt:
+                        link_label = clean_tgt
+                    else:
+                        link_label = ""
+
                     links_out.append({
                         "id":     lid,
-                        "label":  lk.get("label", lid),
-                        "node_a": lk.get("node_a", ""),
-                        "node_b": lk.get("node_b", ""),
-                        "node_a_intf": source_intf,
-                        "node_b_intf": target_intf,
+                        "label":  link_label,
+                        "node_a": lk.get("node_a") or lk.get("n1") or "",
+                        "node_b": lk.get("node_b") or lk.get("n2") or "",
+                        "node_a_intf": clean_src,
+                        "node_b_intf": clean_tgt,
                         "raw": lk,
                     })
                 except Exception:

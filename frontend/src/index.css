@@ -2,8 +2,48 @@
 @tailwind components;
 @tailwind utilities;
 
+/* ── VS Code-inspired IDE design tokens ─────────────────────────────────────
+   All Phase T IDE chrome uses these CSS custom properties so colours can be
+   tweaked in one place. Tailwind utilities reference them via arbitrary-value
+   syntax: bg-[var(--ide-bg)] etc.                                             */
 :root {
-  color-scheme: light;
+  color-scheme: dark;
+
+  /* Base surfaces */
+  --ide-bg:           #1e1e1e;   /* editor / main background */
+  --ide-sidebar-bg:   #252526;   /* activity bar + explorer */
+  --ide-panel-bg:     #252526;   /* bottom panel / advisory */
+  --ide-header-bg:    #3c3c3c;   /* title bar / top chrome */
+  --ide-tab-bg:       #2d2d2d;   /* inactive tab */
+  --ide-tab-active:   #1e1e1e;   /* active tab (same as editor bg) */
+
+  /* Borders */
+  --ide-border:       #3c3c3c;
+  --ide-border-light: #2d2d2d;
+
+  /* Text */
+  --ide-text:         #cccccc;
+  --ide-text-muted:   #858585;
+  --ide-text-dim:     #5a5a5a;
+
+  /* Accent (VS Code blue) */
+  --ide-accent:       #007acc;
+  --ide-accent-hover: #1a8ad4;
+
+  /* Status bar */
+  --ide-status-bg:    #007acc;
+  --ide-status-text:  #ffffff;
+
+  /* Interaction states */
+  --ide-hover:        #2a2d2e;
+  --ide-selected:     #04395e;
+  --ide-focus-ring:   rgba(0,122,204,0.4);
+
+  /* Semantic */
+  --ide-error:        #f44747;
+  --ide-warning:      #cca700;
+  --ide-success:      #4ec9b0;
+  --ide-info:         #75beff;
 }
 
 * {
@@ -14,8 +54,8 @@ body {
   margin: 0;
   min-height: 100vh;
   font-family: 'Space Grotesk', ui-sans-serif, system-ui;
-  color: #0f172a;
-  background: #ffffff;
+  color: var(--ide-text);
+  background: var(--ide-bg);
 }
 
 #root {
@@ -28,9 +68,16 @@ body {
    first column of every line. Keep the rendered font identical to the measured
    one by leaving this to the Terminal config. */
 
+/* ── IDE scrollbar theming (dark, compact like VS Code) ─────────────────── */
+::-webkit-scrollbar            { width: 8px; height: 8px; }
+::-webkit-scrollbar-track      { background: transparent; }
+::-webkit-scrollbar-thumb      { background: #424242; border-radius: 4px; }
+::-webkit-scrollbar-thumb:hover{ background: #686868; }
+
+/* ── Legacy utility classes (kept for existing usage) ────────────────────── */
 .glass {
-  background: rgba(255, 255, 255, 0.82);
-  border: 1px solid rgba(125, 211, 252, 0.28);
+  background: rgba(30, 30, 30, 0.92);
+  border: 1px solid rgba(60, 60, 60, 0.5);
   backdrop-filter: blur(8px);
 }
 
@@ -38,4 +85,11 @@ body {
   width: 10px;
   height: 10px;
   border-radius: 9999px;
+}
+
+/* ── Dark autofill so browser autocomplete matches the IDE theme ─────────── */
+input:-webkit-autofill,
+input:-webkit-autofill:focus {
+  -webkit-box-shadow: 0 0 0 1000px #2d2d2d inset !important;
+  -webkit-text-fill-color: #cccccc !important;
 }

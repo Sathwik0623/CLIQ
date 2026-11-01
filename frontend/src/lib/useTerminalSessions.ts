@@ -52,8 +52,13 @@ type Session = {
   helpTokens: string[];  // Tier 1: continuation tokens captured from device '?'-help
   helpHead: string;      // normalized (lower) command head those tokens continue
   connecting: boolean;   // Phase 3: true while the SSH console attach is in flight
+  connectionLinesDrawn?: number; // Phase U.5: lines drawn for connecting progress in terminal
+  promptRendered?: boolean;      // Phase U.5: true once prompt is rendered for current cycle
+  lastPromptText?: string;       // Phase U.5: text of the last prompt rendered
   streaming: boolean;    // Phase 3: true while command output is streaming in live
   lastEnterAt: number;   // Bug 2: ts of the last Enter, to coalesce a CR/LF pair
+  lastEnterWasCR?: boolean; // Phase U.2: true if last Enter character was CR
+  lastEmptyEnterAt?: number; // Phase U.2: ts of last empty Enter to debounce bounces
   lastSubmitCmd: string; // Bug 2: last command sent, for the duplicate-submit guard
   lastSubmitAt: number;  // Bug 2: ts of the last submit, for the duplicate-submit guard
   helpPending: boolean;  // Bug 4: true between a mid-line '?' and the device's
@@ -582,8 +587,13 @@ export function useTerminalSessions(
       pendingBlock: [],
       rawInput: false,
       helpTokens: [], helpHead: '',
-      connecting: false, streaming: false,
+      connecting: false,
+      connectionLinesDrawn: 0,
+      promptRendered: false,
+      lastPromptText: '',
+      streaming: false,
       lastEnterAt: 0, lastSubmitCmd: '', lastSubmitAt: 0,
+      lastEnterWasCR: false, lastEmptyEnterAt: 0,
       helpPending: false,
       helpPendingTimer: null,
       everConnected: false,
@@ -600,19 +610,66 @@ export function useTerminalSessions(
       sessionGen: undefined,
       lastSeq: 0,
     };
-    // Phase 7 req 3 — Ctrl+. opens the inline Fix/Explain overlay when a
-    // lightbulb is armed for this device. Intercept the keydown before xterm
-    // processes it so '.' is never typed into the buffer.
+    // Phase U.3 / Phase 7 — Key event interception:
+    // 1. Ctrl+. opens the inline Fix/Explain overlay when a lightbulb is armed.
+    // 2. While paging (--More-- active): Space advances page, Enter advances line,
+    //    Tab/q/Ctrl+C exits pager cleanly. Keystrokes are intercepted before browser
+    //    or xterm can move focus away or swallow them.
+    // 3. While not paging: Tab is autocomplete / ghost suggestion accept; preventDefault()
+    //    guarantees Tab NEVER escapes to browser focus navigation.
     term.attachCustomKeyEventHandler((e) => {
-      if (
-        e.type === 'keydown' &&
-        (e.ctrlKey || e.metaKey) &&
-        (e.key === '.' || e.code === 'Period')
-      ) {
-        if (lightbulbRef.current[deviceId]) {
-          openLightbulbOverlay(deviceId);
-          e.preventDefault();
-          return false;
+      if (e.type === 'keydown') {
+        if ((e.ctrlKey || e.metaKey) && (e.key === '.' || e.code === 'Period')) {
+          if (lightbulbRef.current[deviceId]) {
+            openLightbulbOverlay(deviceId);
+            e.preventDefault();
+            return false;
+          }
+        }
+
+        // ── Pager active (Space = page, Enter = line, Tab/q/Ctrl+C = quit) ──
+        if (session.paging) {
+          if (e.key === ' ' || e.code === 'Space') {
+            e.preventDefault();
+            send({ type: 'pager_key', device_id: deviceId, key: 'space' });
+            return false;
+          }
+          if (e.key === 'Enter' || e.code === 'Enter') {
+            e.preventDefault();
+            send({ type: 'pager_key', device_id: deviceId, key: 'enter' });
+            return false;
+          }
+          if (e.key === 'Tab' || e.keyCode === 9 || e.key === 'q' || e.key === 'Q' || ((e.ctrlKey || e.metaKey) && (e.key === 'c' || e.key === 'C'))) {
+            e.preventDefault();
+            send({ type: 'pager_key', device_id: deviceId, key: 'q' });
+            return false;
+          }
+          // During paging, swallow all other typing so buffer is not polluted
+          if (!e.ctrlKey && !e.metaKey && !e.altKey && e.key.length === 1) {
+            e.preventDefault();
+            return false;
+          }
+        } else {
+          // ── Non-paging Tab: prevent browser focus navigation, handle ghost ──
+          if (e.key === 'Tab' || e.keyCode === 9) {
+            e.preventDefault();
+            const ghost = ghostRef.current[deviceId] ?? '';
+            if (ghost && session.ghostLen > 0) {
+              session.term.write('\x1b[K');
+              session.ghostLen = 0;
+              session.term.write(ghost);
+              session.inputBuffer += ghost;
+              session.cursor = session.inputBuffer.length;
+              ghostRef.current[deviceId] = '';
+              clearHintBelow(session);
+              scheduleSuggest(deviceId, session.inputBuffer);
+              setMetrics((current) => ({
+                ...current,
+                [deviceId]: { ...(current[deviceId] ?? defaultMetrics()), ghostText: '' },
+              }));
+            }
+            return false;
+          }
         }
       }
       return true;
@@ -623,42 +680,25 @@ export function useTerminalSessions(
 
     const handleTermData = (data: string): void => {
       // ── In-session reconnect: FREEZE input on connection loss ─────────
-      // Once the device/browser socket has dropped, the terminal must NOT accept
-      // or echo commands into a dead socket (this is the "prompt still accepts
-      // input but nothing happens" bug). Swallow every keystroke until the
-      // session is resumed (device reaches 'connected' again). Reconnect is
-      // driven by the sticky banner's auto-retry / [Reconnect] button, never by
-      // typing here. The value is intentionally not echoed or logged.
       if (session.disconnected || session.frozen) {
         return;
       }
 
       // ── Bug 10: AUTH_PASSTHROUGH — device is at an interactive login ──
-      // SECURITY release-blocker. While the device is parked at a login/password
-      // prompt, terminal keystrokes must NEVER be validated as commands, echoed
-      // in plaintext, or logged. Credentials flow ONLY through the secure masked
-      // dialog (Bug 7). Swallow every key here so a typed password can never
-      // become an "Unknown command: 'cisco'" or leak into the buffer. The value
-      // is intentionally NOT included in observability.
       if (session.authActive) {
         obsAuth('keystroke_swallowed', deviceId);
         return;
       }
 
-      // ── Native --More-- pager mode — route raw keys to the device ──
-      // Priority 3 (CML standard): Space = next page, Enter = next line,
-      // q / Ctrl-C / Tab = quit. Tab is a convenience quit shortcut so the
-      // engineer can bail out of a long output fast. Every other key is
-      // swallowed so nothing can be typed into a paging session.
+      // ── Native --More-- pager mode fallback (data channel) ─────────────
       if (session.paging) {
         if (data === ' ') {
           send({ type: 'pager_key', device_id: deviceId, key: 'space' });
-        } else if (data === '\r' || data === '\n') {
+        } else if (data === '\r' || data === '\n' || data === '\r\n') {
           send({ type: 'pager_key', device_id: deviceId, key: 'enter' });
         } else if (data === 'q' || data === 'Q' || data === '\x03' || data === '\t') {
           send({ type: 'pager_key', device_id: deviceId, key: 'q' });
         }
-        // All other keys: inert while paging.
         return;
       }
 
@@ -733,15 +773,17 @@ export function useTerminalSessions(
       // deferred render is what surfaced the '^@'. The device's own echo is the
       // source of truth; typed input is never queued, re-ordered, or auto-run.
 
-      // ── Enter (Bug 2: treat both CR and LF as a command boundary) ──────
-      if (data === '\r' || data === '\n') {
+      // ── Enter (treat CR, LF, and CRLF as a single command boundary) ──────
+      if (data === '\r' || data === '\n' || data === '\r\n') {
         // CR/LF coalescing: a terminal that sends "\r\n" must fire ONE submit,
-        // not two. Swallow the LF that lands immediately after a CR.
+        // not two. Swallow the LF that immediately follows a CR.
         const nowEnter = Date.now();
-        if (data === '\n' && nowEnter - session.lastEnterAt < 50) {
+        if (data === '\n' && (session.lastEnterWasCR || nowEnter - session.lastEnterAt < 300)) {
+          session.lastEnterWasCR = false;
           session.lastEnterAt = nowEnter;
           return;
         }
+        session.lastEnterWasCR = (data === '\r' || data === '\r\n');
         session.lastEnterAt = nowEnter;
         // Bug 4 safety: a real submit always clears the help gate so a stuck
         // flag can never block legitimate command output.
@@ -774,7 +816,6 @@ export function useTerminalSessions(
 
         const command = session.inputBuffer.trim();
 
-        term.write('\r\n');
         if (command.length > 0) {
           // Bug 2: duplicate-submit guard. A single Enter must never fire two
           // backend submits (key-repeat, a stray duplicate CR, or a fast double
@@ -792,6 +833,8 @@ export function useTerminalSessions(
             setLiveHints((current) => ({ ...current, [deviceId]: null }));
             return;
           }
+          term.write('\r\n');
+          session.promptRendered = false;
           session.lastSubmitCmd = command;
           session.lastSubmitAt = nowEnter;
           // TEMP TRACE (diagnostic): exact bytes SENT to the device over the WS
@@ -841,7 +884,14 @@ export function useTerminalSessions(
             },
           }));
         } else {
-          // Empty Enter: forward to backend so the device console receives \r\n
+          // Empty Enter: debounce rapid double-submits BEFORE writing \r\n to prevent stray blank lines
+          if (nowEnter - (session.lastEmptyEnterAt ?? 0) < 250) {
+            return;
+          }
+          session.lastEmptyEnterAt = nowEnter;
+          session.promptRendered = false;
+          term.write('\r\n');
+          // Forward to backend so the device console receives \r\n
           // to dismiss "Press RETURN" banners, trigger router prompts, or refresh prompt.
           send({ type: 'command', device_id: deviceId, command: '', raw: false });
           setBusy(session);
@@ -1035,6 +1085,7 @@ export function useTerminalSessions(
         if (data === '?' && !session.askMode) {
           // Capture the partial to query the device, THEN immediately drop it.
           const partial = session.inputBuffer;
+          session.promptRendered = false;
           term.write('?');
           clearHintBelow(session);
           // Cancel any in-flight debounced suggest so its (possibly empty) ghost
@@ -1341,6 +1392,31 @@ export function useTerminalSessions(
       layer: 'renderer',
       op: 'render_order',
       outcome,
+    });
+  }
+
+  // Phase U.5: Diagnostic prompt tracing for every detected and rendered prompt
+  function logPromptTrace(
+    deviceId: string,
+    wsEventType: string,
+    source: string,
+    promptDetected: string,
+    promptRendered: boolean,
+    reason: string,
+  ) {
+    const corrId = Math.random().toString(36).slice(2, 8);
+    // eslint-disable-next-line no-console
+    console.debug(
+      `[PROMPT-TRACE] [${corrId}] dev=${deviceId} ws=${wsEventType} src=${source} prompt=${JSON.stringify(promptDetected)} rendered=${promptRendered} reason=${reason}`
+    );
+    send({
+      type: 'client_event',
+      device_id: deviceId,
+      layer: 'renderer',
+      op: 'prompt_render',
+      stage: wsEventType,
+      outcome: promptRendered ? 'rendered' : 'suppressed',
+      detail: `${reason}:${promptDetected}`,
     });
   }
 
@@ -1682,15 +1758,13 @@ export function useTerminalSessions(
     [],
   );
 
-  const devicesKey = useMemo(
-    () => devices.map((d) => d.id).sort().join(','),
-    [devices],
-  );
   const devicesRef = useRef(devices);
   devicesRef.current = devices;
+  const connectedDevicesRef = useRef<Set<string>>(new Set());
+  const inFlightConnectsRef = useRef<Set<string>>(new Set());
 
   useEffect(() => {
-    if (!token || devices.length === 0) return;
+    if (!token) return;
     const currentGen = ++socketGenRef.current;
     const cleanHost = host.trim();
     // Distinguishes an operator-driven teardown (unmount / host or token change)
@@ -1735,13 +1809,16 @@ export function useTerminalSessions(
       if (currentGen !== socketGenRef.current || ws !== wsRef.current) return;
       flushOutboundQueue();
       startHeartbeat();
-      devices.forEach((device) => {
-        ensureSession(device.id);
-        send({ type: 'connect_device', device_id: device.id });
-        setMetrics((current) => ({
-          ...current,
-          [device.id]: { ...(current[device.id] ?? defaultMetrics()), status: 'connected' },
-        }));
+      devicesRef.current.forEach((device) => {
+        if (!connectedDevicesRef.current.has(device.id) && !inFlightConnectsRef.current.has(device.id)) {
+          inFlightConnectsRef.current.add(device.id);
+          ensureSession(device.id);
+          send({ type: 'connect_device', device_id: device.id });
+          setMetrics((current) => ({
+            ...current,
+            [device.id]: { ...(current[device.id] ?? defaultMetrics()), status: 'connected' },
+          }));
+        }
       });
     };
 
@@ -1800,25 +1877,30 @@ export function useTerminalSessions(
         // normal render below just draws the fresh prompt (no double output).
         const wasStreaming = session.streaming;
         session.streaming = false;
-        // First reply after a console attach: drop the "Connecting…" state.
+        // First reply after a console attach: clear the connecting progress line in-place
         if (session.connecting) {
           session.connecting = false;
-          session.term.write(`\r\n${DIM}\u2713 Console ready${RESET}`);
+          if (session.connectionLinesDrawn === 2) {
+            session.term.write('\r\x1b[2K\x1b[1A\r\x1b[2K');
+          } else if (session.connectionLinesDrawn === 1) {
+            session.term.write('\r\x1b[2K');
+          }
+          session.connectionLinesDrawn = 0;
         }
         // Native pager page: stream the text only — no prompt redraw, no input
         // reset. The pager_active/pager_done messages manage the --More-- state.
         if (msg.paging) {
           const page = (msg.output ?? '').replace(/\n/g, '\r\n');
-          if (page.length > 0) session.term.write(`\r\n${page}`);
-          // Priority 3: re-show the affordance after EACH page so the engineer
-          // sees that Space advanced and can keep paging (no silent pager).
           session.paging = true;
           session.term.write(
-            `\r\n${DIM}-- More -- (Space = next page · Enter = line · Tab = quit)${RESET}`,
+            `\r\x1b[2K\r\n${page}\r\n${DIM}-- More -- (Space = next page · Enter = line · Tab = quit)${RESET}`,
           );
-          // Pager owns input now — leave busy so queued keys aren't replayed
-          // into the pager; releaseBusy on the final (non-paging) device_output.
           return;
+        }
+        if (session.paging) {
+          session.paging = false;
+          // Erase remaining -- More -- affordance before final output and prompt
+          session.term.write('\r\x1b[2K');
         }
         clearGhost(session);
         clearHintBelow(session);
@@ -1888,15 +1970,33 @@ export function useTerminalSessions(
           session.promptLen = prompt.length + 1; // + trailing space
           session.cursor = 0;
 
-          // Deduplicate prompt: do not render if current line already ends with prompt
+          // Deduplicate prompt: check session.promptRendered as primary gate,
+          // with buffer inspection as secondary defense.
           const activeBuf = session.term.buffer?.active;
-          const currentLine = activeBuf?.getLine(activeBuf.cursorY)?.translateToString(true) ?? '';
-          const alreadyHasPrompt = currentLine.trim().endsWith(prompt);
-          if (!alreadyHasPrompt) {
+          const lineIndex = (activeBuf?.baseY ?? 0) + (activeBuf?.cursorY ?? 0);
+          const currentLine = activeBuf?.getLine(lineIndex)?.translateToString(true) ?? '';
+          const bufferHasPrompt = currentLine.trim().endsWith(prompt) || currentLine.trim() === prompt;
+          const shouldRender = !session.promptRendered && !bufferHasPrompt;
+
+          if (shouldRender) {
             if (activeBuf && activeBuf.cursorX > 0) {
               session.term.write('\r\n');
             }
             session.term.write(`${prompt} `);
+            session.promptRendered = true;
+            session.lastPromptText = prompt;
+            logPromptTrace(msg.device_id, 'device_output', 'device_output', prompt, true, 'rendered_fresh');
+          } else {
+            session.promptRendered = true;
+            session.lastPromptText = prompt;
+            logPromptTrace(
+              msg.device_id,
+              'device_output',
+              'device_output',
+              prompt,
+              false,
+              bufferHasPrompt ? 'buffer_has_prompt' : 'session_already_rendered',
+            );
           }
           // Guided config block (req 2): auto-load the next step for review.
           // ADVISORY — the engineer still presses Enter; nothing auto-runs.
@@ -1977,24 +2077,29 @@ export function useTerminalSessions(
       }
 
       if (msg.type === 'device_connecting') {
-        // Phase 3 latency masking: the SSH console attach takes ~10s. Show a
-        // "Connecting…" line so the terminal is never blank/frozen. The next
-        // device_output/device_status clears it.
-        // Bug 9: ONLY on the FIRST attach. An idle-reconnect (keepalive
-        // recovery / re-attach) must be invisible — never dump the ⏳ banner
-        // into the middle of an ongoing session. everConnected gates this.
         const session = ensureSession(msg.device_id);
-        if (session.everConnected) {
+        // Do not display connecting message when switching to an already healthy, reused session
+        if (session.everConnected && !session.disconnected && !session.connecting) {
           obsRenderOrder('connecting_banner_suppressed', msg.device_id);
           return;
         }
-        if (!session.connecting) {
-          session.connecting = true;
-          const label = msg.label ?? msg.device_id;
-          session.term.write(
-            `\r\n${DIM}\u23f3 Connecting to ${label} console\u2026 (~10s)${RESET}`,
-          );
+        session.connecting = true;
+        session.promptRendered = false;
+        const label = msg.label || deviceMap.get(msg.device_id)?.label || msg.device_id;
+        const initialMsg = msg.message || `Connecting to ${label} console...`;
+        const activeBuf = session.term.buffer?.active;
+        if (activeBuf && activeBuf.cursorX > 0) {
+          session.term.write('\r\n');
         }
+        session.term.write(`\x1b[36m⚡ Connecting to ${label} console...\x1b[0m\r\n\x1b[2m  ${initialMsg}\x1b[0m`);
+        session.connectionLinesDrawn = 2;
+        return;
+      }
+
+      if (msg.type === 'device_connecting_stage') {
+        const session = ensureSession(msg.device_id);
+        if (!session.connecting) return;
+        session.term.write(`\r\x1b[2K\x1b[2m  ${msg.message}\x1b[0m`);
         return;
       }
 
@@ -2181,6 +2286,17 @@ export function useTerminalSessions(
         const session = sessionsRef.current.get(msg.device_id);
         if (session) {
           clearGhost(session);
+          if (session.connecting) {
+            session.connecting = false;
+            const label = deviceMap.get(msg.device_id)?.label ?? msg.device_id;
+            const errText = `\x1b[31m✗ Connection failed to ${label}: ${msg.what}${msg.how ? ' — ' + msg.how : ''}\x1b[0m\r\n`;
+            if (session.connectionLinesDrawn === 2) {
+              session.term.write(`\r\x1b[2K\x1b[1A\r\x1b[2K${errText}`);
+            } else {
+              session.term.write(`\r\x1b[2K${errText}`);
+            }
+            session.connectionLinesDrawn = 0;
+          }
           // A step failed (or was flagged pre-exec): abort any guided config
           // block so CLIQ never silently advances past a problem.
           session.pendingBlock = [];
@@ -2198,6 +2314,8 @@ export function useTerminalSessions(
             const RST = '\x1b[0m';
             session.term.write(`\r\n${CLIQ}${BOLD}⚡ CLIQ:${RST}${CLIQ} ${msg.what}${RST}\r\n`);
             if (msg.what === 'Device not connected' || session.disconnected) {
+              connectedDevicesRef.current.delete(msg.device_id);
+              inFlightConnectsRef.current.delete(msg.device_id);
               session.disconnected = true;
               session.frozen = true;
               promptRef.current[msg.device_id] = '';
@@ -2370,6 +2488,8 @@ export function useTerminalSessions(
         // Bug 9: mark the device as having connected at least once so any later
         // idle re-attach stays silent (no ⏳ banner).
         if ((msg.status ?? 'connected') === 'connected') {
+          connectedDevicesRef.current.add(msg.device_id);
+          inFlightConnectsRef.current.delete(msg.device_id);
           const s = sessionsRef.current.get(msg.device_id);
           if (s) {
             if (msg.session_gen) {
@@ -2386,15 +2506,14 @@ export function useTerminalSessions(
             // leave AUTH_PASSTHROUGH so normal command processing resumes.
             setAuthActive(s, msg.device_id, null);
 
-            if (isFirstConnect) {
-              const deviceLabel = deviceMap.get(msg.device_id)?.label ?? msg.device_id;
-              s.term.writeln(`\x1b[1;32mCLIQ\x1b[0m \x1b[32mConnected to ${deviceLabel}\x1b[0m`);
-            }
+            // isFirstConnect tracked in session state; terminal stays clean with genuine device console output only
           }
           // In-session reconnect: if this device was mid-reconnect, resume it —
           // re-arm input, clear the sticky banner, and confirm in the terminal.
           markReconnected(msg.device_id);
         } else if (msg.status === 'disconnected') {
+          connectedDevicesRef.current.delete(msg.device_id);
+          inFlightConnectsRef.current.delete(msg.device_id);
           promptRef.current[msg.device_id] = '';
           const s = sessionsRef.current.get(msg.device_id);
           if (s) {
@@ -2609,53 +2728,54 @@ export function useTerminalSessions(
             head, session.helpTokens.length, msg.more === true,
           );
 
+          // Phase U.4: Help arrived from backend — clear helpPending IMMEDIATELY.
+          // helpPending must ONLY guard the initial round-trip between typing '?' and the first
+          // device_help reply. Leaving it armed for 12s causes all subsequent device_output messages
+          // to be dropped ('device_output_dropped'), resulting in frozen terminals and duplicate
+          // prompt collisions when the timeout expires.
+          clearHelpPending(session);
+
           if (msg.more === true) {
             // Priority 2/3: more pages remain. Enter pager mode so Space fetches
-            // the next page (Enter = line, q = quit). Keep the line buffer empty
+            // the next page (Enter = line, Tab/q = quit). Keep the line buffer empty
             // and DON'T draw a prompt yet.
             session.paging = true;
             session.inputBuffer = '';
             session.cursor = 0;
             ghostRef.current[msg.device_id] = '';
-            // Bug 4: more pages remain — KEEP the help gate armed so a stray
-            // prompt redraw between pages is still dropped. Re-arm the safety
-            // timer so a long pager session can never trip the auto-clear while
-            // the engineer is still paging.
-            armHelpPending(session, msg.device_id);
-            // Bug 4: flush the buffered help body, THEN the '-- More --' line, in
-            // one atomic write so the affordance never precedes the help text.
-            session.term.write(
-              `${helpOut}\r\n${DIM}-- More -- (Space = next page · Enter = line · Tab = quit)${RESET}`,
-            );
+            // Erase the existing -- More -- line cleanly before writing the next page
+            const cleanFlush = `\r\x1b[2K${helpOut}\r\n${DIM}-- More -- (Space = next page · Enter = line · Tab = quit)${RESET}`;
+            session.term.write(cleanFlush);
           } else {
             // Help complete. Priority 4/5: draw exactly ONE fresh prompt (no
             // duplicate R1#) and RESTORE the command the engineer was typing
             // before the '?'. After 'show ?' the line comes back as 'show ' so
             // they can keep typing the next token instead of retyping it.
             session.paging = false;
-            const p = promptRef.current[msg.device_id] ?? '';
-            session.promptLen = p.length + 1;
+            const p = (msg.prompt && msg.prompt.trim()) || promptRef.current[msg.device_id] || `${msg.device_id}#`;
+            promptRef.current[msg.device_id] = p;
             const restore = partialStr;
+            session.promptLen = p.length + 1;
             session.inputBuffer = restore;
             session.cursor = restore.length;
             ghostRef.current[msg.device_id] = '';
             clearGhost(session);
             clearHintBelow(session);
-            // Bug 4: help round-trip resolved (last page) — release the gate.
             clearHelpPending(session);
-            // Bug 4: flush ALL buffered help text FIRST, then draw exactly ONE
-            // prompt with the restored partial. Callback ordering gates the
-            // prompt redraw behind the help flush so the prompt CANNOT render
-            // until the help body has been written to the terminal buffer
-            // (kills the early-prompt corruption).
-            const tail = `\r\n${p} ${restore}`;
+            // Flush any remaining help text after erasing the -- More -- line,
+            // then render exactly ONE usable prompt with the restored partial.
+            const promptStr = restore ? `${p} ${restore}` : `${p} `;
+            session.promptRendered = true;
+            session.lastPromptText = p;
+            logPromptTrace(msg.device_id, 'device_help', 'device_help', p, true, 'help_restore');
             if (helpOut) {
-              session.term.write(helpOut, () => {
-                session.term.write(tail);
+              session.term.write(`\r\x1b[2K${helpOut}`, () => {
+                session.term.write(`\r\n${promptStr}`);
                 obsRenderOrder('help_flushed', msg.device_id);
               });
             } else {
-              session.term.write(tail);
+              // Exiting pager via Tab/q with no extra output: clear the -- More -- line and restore prompt on the same line
+              session.term.write(`\r\x1b[2K${promptStr}`);
               obsRenderOrder('help_flushed', msg.device_id);
             }
           }
@@ -2668,7 +2788,7 @@ export function useTerminalSessions(
       if (currentGen !== socketGenRef.current || ws !== wsRef.current) return;
       setMetrics((current) => {
         const next = { ...current };
-        devices.forEach((d) => {
+        devicesRef.current.forEach((d) => {
           next[d.id] = { ...(next[d.id] ?? defaultMetrics()), status: 'error' };
         });
         return next;
@@ -2684,12 +2804,14 @@ export function useTerminalSessions(
       // auto-reconnect under the SAME token/host (no re-login, no fresh
       // terminal, scrollback preserved).
       stopHeartbeat();
+      connectedDevicesRef.current.clear();
+      inFlightConnectsRef.current.clear();
       if (currentGen !== socketGenRef.current || ws !== wsRef.current || intentionalClose) return;
       const YEL = '\x1b[33m';
       const BOLD = '\x1b[1m';
       const RST = '\x1b[0m';
       const ids = new Set<string>([
-        ...devices.map((d) => d.id),
+        ...devicesRef.current.map((d) => d.id),
         ...sessionsRef.current.keys(),
       ]);
       ids.forEach((deviceId) => {
@@ -2708,7 +2830,7 @@ export function useTerminalSessions(
       });
       setMetrics((current) => {
         const next = { ...current };
-        devices.forEach((d) => {
+        devicesRef.current.forEach((d) => {
           next[d.id] = {
             ...(next[d.id] ?? defaultMetrics()),
             status: 'disconnected',
@@ -2729,8 +2851,48 @@ export function useTerminalSessions(
         wsRef.current = null;
       }
       outboundQueueRef.current = [];
+      connectedDevicesRef.current.clear();
+      inFlightConnectsRef.current.clear();
     };
-  }, [devicesKey, host, token, wsEpoch]);
+  }, [host, token, wsEpoch]);
+
+  // ── Multi-Device Session Sync (Phase U) ───────────────────────────────────
+  // Single persistent WebSocket connection across tab additions/switches.
+  // Connects new devices over the existing live socket; never recreates WebSockets
+  // or disturbs already-open devices (R1, R2, etc.) when new tabs are opened/closed.
+  useEffect(() => {
+    if (!token) return;
+    const currentDeviceIds = new Set(devices.map((d) => d.id));
+
+    // Connect any new device that hasn't been connected or initiated yet
+    devices.forEach((device) => {
+      if (
+        !connectedDevicesRef.current.has(device.id) &&
+        !inFlightConnectsRef.current.has(device.id)
+      ) {
+        inFlightConnectsRef.current.add(device.id);
+        ensureSession(device.id);
+        send({ type: 'connect_device', device_id: device.id });
+        setMetrics((current) => ({
+          ...current,
+          [device.id]: { ...(current[device.id] ?? defaultMetrics()), status: 'connected' },
+        }));
+      }
+    });
+
+    // Clean tracking sets for devices that are no longer open
+    for (const devId of Array.from(connectedDevicesRef.current)) {
+      if (!currentDeviceIds.has(devId)) {
+        connectedDevicesRef.current.delete(devId);
+        inFlightConnectsRef.current.delete(devId);
+      }
+    }
+    for (const devId of Array.from(inFlightConnectsRef.current)) {
+      if (!currentDeviceIds.has(devId)) {
+        inFlightConnectsRef.current.delete(devId);
+      }
+    }
+  }, [devices, token]);
 
   useEffect(() => {
     const onResize = () => {
