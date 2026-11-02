@@ -42,7 +42,7 @@ log = logging.getLogger("cliq.memory.store")
 _PROJECT_ROOT = os.path.dirname(
     os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 )
-DEFAULT_LOG_DB = os.path.join(_PROJECT_ROOT, "session_log.sqlite")
+DEFAULT_LOG_DB = os.environ.get("CLIQ_SESSION_DB", os.path.join(_PROJECT_ROOT, "session_log.sqlite"))
 
 
 @dataclass
@@ -61,6 +61,7 @@ class SessionLog:
 
     def __init__(self, db_path: str = DEFAULT_LOG_DB):
         self.db_path = db_path
+        os.makedirs(os.path.dirname(os.path.abspath(db_path)), exist_ok=True)
         self._lock = threading.Lock()
         self._conn = sqlite3.connect(db_path, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row

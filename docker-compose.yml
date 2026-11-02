@@ -1,0 +1,42 @@
+services:
+  cliq:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: cliq:latest
+    container_name: cliq-app
+    restart: unless-stopped
+    ports:
+      - "${CLIQ_PORT:-8000}:8000"
+    environment:
+      - CLIQ_HOST=0.0.0.0
+      - CLIQ_PORT=8000
+      - CLIQ_FRONTEND_DIR=/app/frontend/dist
+      - CLIQ_SESSION_DB=/app/.cliq/session_log.sqlite
+      - CLIQ_RESERVATION_POLICY=${CLIQ_RESERVATION_POLICY:-warn}
+      - CLIQ_NETSIM_API_KEY=${CLIQ_NETSIM_API_KEY:-}
+      - HF_HUB_OFFLINE=1
+      - TRANSFORMERS_OFFLINE=1
+      - HF_HUB_DISABLE_XET=1
+    env_file:
+      - path: .env
+        required: false
+    volumes:
+      - cliq_data:/app/.cliq
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request, sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3).getcode() == 200 else 1)\""]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  cliq_data:
+    name: cliq_app_data

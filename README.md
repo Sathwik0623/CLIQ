@@ -251,9 +251,30 @@ CLIQ supports interactive authentication flows while safeguarding sensitive cred
 
 ## 12. Startup & Deployment Workflows
 
-### Option A: Single-Port Production Mode (Recommended)
+### Option A: Docker & Docker Compose (Containerized Production — Recommended)
 
-FastAPI serves both the built React/xterm.js frontend and the WebSocket terminal backend on a single port. Ideal for lab sharing and air-gapped hosting:
+CLIQ provides a production-grade multi-stage Dockerfile that builds the React frontend and packages the FastAPI backend into a secure, non-root, single-port container:
+
+```powershell
+# 1. Prepare environment configuration
+Copy-Item .env.example .env
+
+# 2. Build and launch container in background
+docker compose build
+docker compose up -d
+```
+
+- Access the IDE at `http://localhost:8000/`.
+- Verify container health: `curl http://localhost:8000/health` (or check `docker compose ps`).
+- View streaming logs: `docker compose logs -f cliq`.
+- Restart container: `docker compose restart cliq`.
+- Shut down: `docker compose down`.
+- Data persistence: Runtime learned commands, operational memory, and audit traces are preserved across restarts via the `cliq_data` volume.
+- See the comprehensive [docs/DOCKER.md](docs/DOCKER.md) for full networking, volume management, and troubleshooting details.
+
+### Option B: Single-Port Native Production Mode
+
+FastAPI serves both the built React/xterm.js frontend and the WebSocket terminal backend on a single port. Ideal for lab sharing and air-gapped hosting without Docker:
 
 ```powershell
 # 1. Build frontend bundle
@@ -267,7 +288,7 @@ cd ..
 
 Access the IDE at `http://<machine-ip>:8000/`.
 
-### Option B: Local Development Workflow
+### Option C: Local Development Workflow
 
 Run backend and frontend independently with hot reloading enabled:
 
@@ -283,7 +304,7 @@ npm run dev
 
 Vite proxies `/api` and `/ws` requests directly to `:8000`. Access the dev server at `http://localhost:5173/`.
 
-### Option C: Standalone Terminal CLI
+### Option D: Standalone Terminal CLI
 
 Run the prompt_toolkit-based terminal shell directly in your console:
 
@@ -340,11 +361,17 @@ npm --prefix frontend run build
 
 ```
 CLIQ/
+├── Dockerfile                   # Multi-stage production container definition
+├── docker-compose.yml           # Service orchestration and volume configuration
+├── .dockerignore                # Container build context exclusions
+├── .env.example                 # Configuration template with security guidelines
 ├── command_db/                  # Source-of-truth command syntax definitions (YAML)
 │   ├── modes.yaml               # CLI execution mode hierarchy
 │   ├── arg_types.yaml           # Argument validators (regex, ranges, enums)
 │   ├── exec/                    # User exec and privileged exec commands
 │   └── config/                  # Configuration mode commands (if, router, line)
+├── docs/                        # Technical documentation
+│   └── DOCKER.md                # Detailed Docker architecture and networking guide
 ├── frontend/                    # Modern React / Vite / Tailwind engineering IDE
 │   ├── src/
 │   │   ├── components/          # IDE layout, Explorer, Tabs, StatusBar, Terminal

@@ -1,0 +1,66 @@
+# Version control
+.git
+.gitignore
+.github
+
+# Virtual environments
+.venv
+venv
+env
+ENV
+
+# Python artifacts and caches
+__pycache__
+*.py[cod]
+*$py.class
+*.so
+.pytest_cache
+.mypy_cache
+.ruff_cache
+build
+dist
+*.egg-info
+
+# Node / Frontend development
+frontend/node_modules
+node_modules
+frontend/dist
+.vite
+frontend/.vite
+*.tsbuildinfo
+
+# Local secrets & sensitive files — NEVER in image
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+*.pub
+id_ed25519*
+credentials.json
+token_cache.json
+*token_cache*.json
+*.token
+diagnostic_bundle_*.zip
+
+# Runtime logs & SQLite databases
+*.sqlite
+*.db
+session_log.sqlite
+*.log
+logs
+.cliq
+.memories
+
+# Large harvest data and dumps
+ntc_harvest.json
+data/harvest
+Router commands.txt
+docs/CLI.docx
+
+# IDE & OS files
+.vscode
+.idea
+.DS_Store
+Thumbs.db
+
