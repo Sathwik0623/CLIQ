@@ -254,12 +254,16 @@ def _clean_page(raw: str, command: str | None = None) -> str:
     """
     text = _ANSI_STRIP.sub("", raw or "")
     text = _MORE_RE.sub("", text)
+    text = re.sub(r"\x08+[ \t]*\x08*", "", text)
     text = text.replace("\x08", "")
     lines = text.split("\n")
     if command:
         cnorm = command.strip().lower()
         if lines and lines[0].strip().lower() == cnorm:
             lines = lines[1:]
+    # Strip leading erase spaces on page boundary if leftover from --More--
+    if lines and re.match(r"^[ \t]{6,10}(?=\S)", lines[0]):
+        lines[0] = re.sub(r"^[ \t]{6,10}", "", lines[0])
     # Trim trailing blank lines first so lines[-1] is the actual final line
     while lines and not lines[-1].strip():
         lines.pop()
@@ -1227,7 +1231,11 @@ class CMLConsoleDevice:
                 )
         except Exception:
             pass
-        self._chan.send(data)
+        out_bytes = data if isinstance(data, (bytes, bytearray)) else str(data).encode("utf-8")
+        if hasattr(self._chan, "sendall"):
+            self._chan.sendall(out_bytes)
+        else:
+            self._chan.send(data)
 
 
     def _read_cml_prompt(self, timeout: float = 8.0) -> str:
@@ -1266,8 +1274,9 @@ class CMLConsoleDevice:
             try:
                 chunk = self._chan.recv(4096)
                 if not chunk:
-                    time.sleep(0.05)
+                    time.sleep(0.04)
                     continue
+                last_data = time.monotonic()
                 # Phase A latency: stamp the first byte of this read cycle so
                 # execute() can report request→first_byte latency. Measurement
                 # only — does not alter read/prompt behavior.
@@ -1334,6 +1343,7 @@ class CMLConsoleDevice:
         buf = ""
         streamed = ""
         deadline = time.time() + timeout
+        last_data = time.monotonic()
         cmd_norm = command.strip().lower() if command else ""
         echo_cleared = False if cmd_norm else True
         output_started = False
@@ -1342,8 +1352,9 @@ class CMLConsoleDevice:
             try:
                 chunk = self._chan.recv(4096)
                 if not chunk:
-                    time.sleep(0.05)
+                    time.sleep(0.04)
                     continue
+                last_data = time.monotonic()
                 # Phase A latency: stamp the first byte of this read cycle so
                 # execute_paged() can report request→first_byte latency.
                 # Measurement only — does not alter read/prompt behavior.
@@ -1423,13 +1434,13 @@ class CMLConsoleDevice:
 
                 stripped = _ANSI_STRIP.sub("", buf).rstrip()
                 last = stripped.split("\n")[-1] if stripped else ""
+                if _MORE_RE.search(stripped):
+                    return buf, "more"
                 if _PROMPT_RE.search(last):
                     self._current_prompt = last.strip()
                     return buf, "prompt"
                 if _PASSWORD_RE.search(last):
                     return buf, "prompt"
-                if _MORE_RE.search(stripped):
-                    return buf, "more"
                 # EXEC-level logout ('exit'/'logout') parks at the "Press RETURN
                 # to get started." banner — signal it so execute_paged() can
                 # re-wake to the user EXEC prompt instead of blocking to timeout.
@@ -1444,11 +1455,11 @@ class CMLConsoleDevice:
             except socket.timeout:
                 stripped = _ANSI_STRIP.sub("", buf).rstrip()
                 last = stripped.split("\n")[-1] if stripped else ""
+                if _MORE_RE.search(stripped):
+                    return buf, "more"
                 if _PROMPT_RE.search(last):
                     self._current_prompt = last.strip()
                     return buf, "prompt"
-                if _MORE_RE.search(stripped):
-                    return buf, "more"
                 if _PRESS_RETURN_RE.search(stripped):
                     self._current_prompt = ""
                     return buf, "logout"
@@ -1504,7 +1515,8 @@ class CMLConsoleDevice:
             # stamp, send, read; _read_page records when the first byte arrives.
             self._read_first_byte_ts = None
             _t_request = time.monotonic()
-            self._send(command)
+            # Bare CR: prevents trailing \n from being consumed as an invalid key at --More-- pager prompt
+            self._send(command, submit="\r")
             raw, state = self._read_page(timeout=60, on_chunk=on_chunk, command=command)
             # EXEC-level logout ('exit'/'logout' from user or privileged EXEC)
             # parks the line at the "Press RETURN to get started." banner. Send a
@@ -1578,10 +1590,9 @@ class CMLConsoleDevice:
         if io_lock is None:
             io_lock = self._io_lock = threading.RLock()
         with io_lock:
-            self._check_connection()
             log.debug("PAGER-KEY -> %r", key)
             self._audit_send(key, source="pager_send_key")
-            raw, state = self._read_page(timeout=60)
+            raw, state = self._read_page(timeout=15.0)
         more = state == "more"
         return _clean_page(raw), more
 

@@ -3109,11 +3109,22 @@ async def ws_terminal(websocket: WebSocket, token: str, host: str) -> None:
     _bg_tasks: set[asyncio.Task] = set()
     _keepalive_task: asyncio.Task | None = None
 
+    async def _safe_send_json(payload: dict) -> bool:
+        """Safely send JSON to the websocket, absorbing disconnects or closed state."""
+        try:
+            await websocket.send_json(payload)
+            return True
+        except (WebSocketDisconnect, RuntimeError, ConnectionResetError, asyncio.CancelledError):
+            return False
+        except Exception as exc:
+            log.debug("websocket send error: %s", exc)
+            return False
+
     def _spawn_bg(coro) -> asyncio.Task:
         async def _safe_bg():
             try:
                 await coro
-            except (asyncio.CancelledError, WebSocketDisconnect):
+            except (asyncio.CancelledError, WebSocketDisconnect, RuntimeError):
                 pass
             except Exception as e:
                 log.debug("bg task error: %s", e)
@@ -3260,14 +3271,9 @@ async def ws_terminal(websocket: WebSocket, token: str, host: str) -> None:
         return False
 
     async def _run_session_health_check(device_id, runtime) -> None:
-        """Probe one device's session over the DeviceTransport surface and act.
-
-        Alive → (optionally) a silent idle-drop recovery, no user-visible banner.
-        Dead  → :func:`_mark_session_dead` (notice + halt + registry release).
-        Identical for CML and SSH — only the transport-specific detection
-        primitives (``_check_connection`` / ``reattach``) differ, and those live in
-        the backends.
-        """
+        """Probe one device's session over the DeviceTransport surface and act."""
+        if getattr(runtime, "pager_active", False) or getattr(runtime, "help_paging", False):
+            return  # Device is actively paging; never send keepalive probes
         start = time.monotonic()
         transport = _transport_label(runtime.device)
         result = None
@@ -3350,6 +3356,8 @@ async def ws_terminal(websocket: WebSocket, token: str, host: str) -> None:
                         continue  # device is mid-command; its own path keeps it warm
                     if runtime.dead:
                         continue  # already released — wait for an operator reconnect
+                    if getattr(runtime, "pager_active", False) or getattr(runtime, "help_paging", False):
+                        continue  # mid-pager; keepalive probe would break pager channel
                     await _run_session_health_check(device_id, runtime)
         except asyncio.CancelledError:
             pass
@@ -5048,6 +5056,127 @@ async def ws_terminal(websocket: WebSocket, token: str, host: str) -> None:
         )
 
 
+    async def handle_pager_key(device_id: str, message: dict) -> None:
+        """Handle raw pager key (space, enter, q) asynchronously in the background.
+
+        Decoupled from the main websocket receive loop so incoming pings always receive
+        immediate pongs regardless of device I/O duration or terminal locks.
+        """
+        runtime = runtimes.get(device_id) or _DEVICE_RUNTIMES.get((token, device_id))
+        if not runtime:
+            return
+        if device_id not in runtimes:
+            runtimes[device_id] = runtime
+        if not runtime.pager_active:
+            return
+        runtime.pager_interactions = getattr(runtime, "pager_interactions", 0) + 1
+        logical = str(message.get("key", "space")).strip().lower()
+        raw_key = {
+            "space": " ", " ": " ",
+            "enter": "\r", "return": "\r", "\r": "\r", "\n": "\r",
+            "q": "q", "quit": "q",
+            "tab": "\x03", "\t": "\x03",
+            "ctrl+c": "\x03", "ctrl-c": "\x03", "\x03": "\x03", "c": "\x03",
+        }.get(logical, " ")
+
+        obs.log_event(
+            "pager", "handle_key", "start", "dispatch",
+            device_uuid=device_id, key=logical,
+        )
+
+        # ── Streaming '?'-help pager (Priority 1+2) ────────────────
+        if runtime.help_paging:
+            t0_help = time.perf_counter()
+            async with runtime.lock:
+                try:
+                    page, more = await asyncio.to_thread(
+                        runtime.device.context_help_more, raw_key,
+                    )
+                except Exception as exc:
+                    runtime.help_paging = False
+                    runtime.pager_active = False
+                    log.warning("help pager error: %s", exc)
+                    prompt = runtime.device.current_prompt or runtime.prompt or f"{device_id}#"
+                    await _safe_send_json({
+                        "type": "device_help", "device_id": device_id,
+                        "partial": runtime.help_partial, "output": "",
+                        "more": False, "prompt": prompt,
+                        "helpComplete": True,
+                    })
+                    return
+                elapsed_ms = round((time.perf_counter() - t0_help) * 1000, 1)
+                _cache_device_help(
+                    device_id, runtime.help_partial, page, extend=True,
+                    mode=runtime.mode, node_type=runtime.node_type,
+                )
+                runtime.help_paging = more
+                runtime.pager_active = more
+                prompt = runtime.device.current_prompt or runtime.prompt or f"{device_id}#"
+                runtime.prompt = prompt
+                obs.log_pager_event(
+                    device_id, "help_more", "advance" if more else "complete",
+                    "more" if more else "done",
+                    key=logical, elapsed_ms=elapsed_ms,
+                    detail=f"chars={len(page)} more={more}",
+                )
+            await _safe_send_json({
+                "type": "device_help", "device_id": device_id,
+                "partial": runtime.help_partial, "output": page,
+                "more": more, "prompt": prompt,
+                "helpComplete": not more,
+            })
+            return
+
+        async with runtime.lock:
+            t0 = time.perf_counter()
+            try:
+                page, more = await asyncio.to_thread(
+                    runtime.device.pager_send_key, raw_key
+                )
+            except Exception as exc:
+                runtime.pager_active = False
+                prompt = runtime.device.current_prompt or runtime.prompt or f"{device_id}#"
+                await _safe_send_json({
+                    "type": "pager_done", "device_id": device_id,
+                    "prompt": prompt, "mode": runtime.mode,
+                })
+                log.warning("pager_key error: %s", exc)
+                return
+            latency_ms = round((time.perf_counter() - t0) * 1000)
+            prompt = runtime.device.current_prompt or runtime.prompt or f"{device_id}#"
+
+            obs.log_pager_event(
+                device_id, "native_pager", "advance" if more else "complete",
+                "more" if more else "done",
+                key=logical, elapsed_ms=latency_ms,
+                detail=f"chars={len(page or '')} more={more}",
+            )
+
+            if more:
+                await _safe_send_json({
+                    "type": "device_output", "device_id": device_id,
+                    "output": page or "", "prompt": "", "paging": True,
+                })
+                return
+
+            # Pager finished: flush the last page and restore the prompt.
+            runtime.pager_active = False
+            runtime.mode = _parse_mode(prompt)
+            runtime.prompt = prompt
+            await _safe_send_json({
+                "type": "device_output", "device_id": device_id,
+                "output": page or "", "prompt": prompt, "paging": False,
+            })
+            await _safe_send_json({
+                "type": "pager_done", "device_id": device_id,
+                "prompt": prompt, "mode": runtime.mode,
+            })
+            await _safe_send_json({
+                "type": "device_status", "device_id": device_id,
+                "mode": runtime.mode, "status": runtime.status,
+                "latency": latency_ms, "prompt": runtime.prompt,
+            })
+
     try:
         while True:
             # Phase R: If another WebSocket connected for this token, yield cleanly to the owner
@@ -5256,120 +5385,9 @@ async def ws_terminal(websocket: WebSocket, token: str, host: str) -> None:
                 )
 
             elif msg_type == "pager_key":
-                # Native --More-- paging: route a single raw key to the device.
-                # CML standard: space = next page, enter = next line, q = quit.
-                # Tab is ALSO a quit shortcut (convenience): it exits paging just
-                # like q, so the engineer can bail out of a long output fast.
-                runtime = runtimes.get(device_id) or _DEVICE_RUNTIMES.get((token, device_id))
-                if not runtime:
-                    continue
-                if device_id not in runtimes:
-                    runtimes[device_id] = runtime
-                if not runtime.pager_active:
-                    continue
-                runtime.pager_interactions = getattr(runtime, "pager_interactions", 0) + 1
-                logical = str(message.get("key", "space")).strip().lower()
-                raw_key = {
-                    "space": " ", " ": " ",
-                    "enter": "\r", "return": "\r", "\r": "\r", "\n": "\r",
-                    "q": "q", "quit": "q", "tab": "q", "\t": "q",
-                    "ctrl+c": "q", "ctrl-c": "q", "\x03": "q", "c": "q",
-                }.get(logical, " ")
-
-                # ── Streaming '?'-help pager (Priority 1+2) ────────────────
-                # Help paging streams device_help pages; tokens from each page
-                # are merged into the ghost cache so completion keeps improving.
-                if runtime.help_paging:
-                    t0_help = time.perf_counter()
-                    async with runtime.lock:
-                        try:
-                            page, more = await asyncio.to_thread(
-                                runtime.device.context_help_more, raw_key,
-                            )
-                        except Exception as exc:
-                            runtime.help_paging = False
-                            runtime.pager_active = False
-                            log.warning("help pager error: %s", exc)
-                            prompt = runtime.device.current_prompt or runtime.prompt or f"{device_id}#"
-                            await websocket.send_json({
-                                "type": "device_help", "device_id": device_id,
-                                "partial": runtime.help_partial, "output": "",
-                                "more": False, "prompt": prompt,
-                                "helpComplete": True,
-                            })
-                            continue
-                        elapsed_ms = round((time.perf_counter() - t0_help) * 1000, 1)
-                        _cache_device_help(
-                            device_id, runtime.help_partial, page, extend=True,
-                            mode=runtime.mode, node_type=runtime.node_type,
-                        )
-                        runtime.help_paging = more
-                        runtime.pager_active = more
-                        prompt = runtime.device.current_prompt or runtime.prompt or f"{device_id}#"
-                        runtime.prompt = prompt
-                        obs.log_pager_event(
-                            device_id, "help_more", "advance" if more else "complete",
-                            "more" if more else "done",
-                            key=logical, elapsed_ms=elapsed_ms,
-                            detail=f"chars={len(page)} more={more}",
-                        )
-                    await websocket.send_json({
-                        "type": "device_help", "device_id": device_id,
-                        "partial": runtime.help_partial, "output": page,
-                        "more": more, "prompt": prompt,
-                        "helpComplete": not more,
-                    })
-                    continue
-
-                async with runtime.lock:
-                    t0 = time.perf_counter()
-                    try:
-                        page, more = await asyncio.to_thread(
-                            runtime.device.pager_send_key, raw_key
-                        )
-                    except Exception as exc:
-                        runtime.pager_active = False
-                        prompt = runtime.device.current_prompt or runtime.prompt or f"{device_id}#"
-                        await websocket.send_json({
-                            "type": "pager_done", "device_id": device_id,
-                            "prompt": prompt, "mode": runtime.mode,
-                        })
-                        log.warning("pager_key error: %s", exc)
-                        continue
-                    latency_ms = round((time.perf_counter() - t0) * 1000)
-                    prompt = runtime.device.current_prompt or runtime.prompt or f"{device_id}#"
-
-                    obs.log_pager_event(
-                        device_id, "native_pager", "advance" if more else "complete",
-                        "more" if more else "done",
-                        key=logical, elapsed_ms=latency_ms,
-                        detail=f"chars={len(page or '')} more={more}",
-                    )
-
-                    if more:
-                        await websocket.send_json({
-                            "type": "device_output", "device_id": device_id,
-                            "output": page or "", "prompt": "", "paging": True,
-                        })
-                        continue
-
-                    # Pager finished: flush the last page and restore the prompt.
-                    runtime.pager_active = False
-                    runtime.mode = _parse_mode(prompt)
-                    runtime.prompt = prompt
-                    await websocket.send_json({
-                        "type": "device_output", "device_id": device_id,
-                        "output": page or "", "prompt": prompt,
-                    })
-                    await websocket.send_json({
-                        "type": "pager_done", "device_id": device_id,
-                        "prompt": prompt, "mode": runtime.mode,
-                    })
-                    await websocket.send_json({
-                        "type": "device_status", "device_id": device_id,
-                        "mode": runtime.mode, "status": runtime.status,
-                        "latency": latency_ms, "prompt": runtime.prompt,
-                    })
+                # Native --More-- paging: route a single raw key to the device in background
+                # so the websocket receive loop is never blocked for heartbeats (ping/pong).
+                _spawn_bg(handle_pager_key(device_id, message))
 
             elif msg_type == "ask":
                 # Normalize question: strip leading/trailing whitespace and ensure no residual '?'.
@@ -5723,8 +5741,7 @@ async def ws_terminal(websocket: WebSocket, token: str, host: str) -> None:
                     "errorType": "missing_arg", "what": "Unsupported message",
                     "how": f"Unknown type: {msg_type}",
                 })
-    except WebSocketDisconnect:
-
+    except (WebSocketDisconnect, RuntimeError):
         pass
     finally:
         # Phase A usage analytics (local-only, Phase H seed): session end.

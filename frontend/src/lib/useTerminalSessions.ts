@@ -311,6 +311,8 @@ export function useTerminalSessions(
   // keystroke has since fired) and are DISCARDED so old ghosts never clobber
   // the current line.
   const suggestSeqRef = useRef<Record<string, number>>({});
+  // Pager key debounce ref to prevent rapid double-sending from keydown + termData
+  const lastPagerKeyTimeRef = useRef<Record<string, number>>({});
   const [metrics, setMetrics] = useState<Record<string, DeviceMetrics>>({});
   const [errors, setErrors] = useState<Record<string, DeviceError[]>>({});
   const [liveHints, setLiveHints] = useState<Record<string, LiveHint | null>>({});
@@ -629,19 +631,38 @@ export function useTerminalSessions(
 
         // ── Pager active (Space = page, Enter = line, Tab/q/Ctrl+C = quit) ──
         if (session.paging) {
+          const sendPager = (k: 'space' | 'enter' | 'q' | 'tab') => {
+            const now = Date.now();
+            const last = lastPagerKeyTimeRef.current[deviceId] ?? 0;
+            if (now - last < 150) return;
+            lastPagerKeyTimeRef.current[deviceId] = now;
+            // eslint-disable-next-line no-console
+            console.debug('[CLIQ pager_key] key=%s device=%s', k, deviceId);
+            send({ type: 'pager_key', device_id: deviceId, key: k });
+          };
+
           if (e.key === ' ' || e.code === 'Space') {
             e.preventDefault();
-            send({ type: 'pager_key', device_id: deviceId, key: 'space' });
+            sendPager('space');
             return false;
           }
           if (e.key === 'Enter' || e.code === 'Enter') {
             e.preventDefault();
-            send({ type: 'pager_key', device_id: deviceId, key: 'enter' });
+            sendPager('enter');
             return false;
           }
-          if (e.key === 'Tab' || e.keyCode === 9 || e.key === 'q' || e.key === 'Q' || ((e.ctrlKey || e.metaKey) && (e.key === 'c' || e.key === 'C'))) {
+          if (e.key === 'Tab' || e.keyCode === 9) {
             e.preventDefault();
-            send({ type: 'pager_key', device_id: deviceId, key: 'q' });
+            session.inputBuffer = '';
+            session.cursor = 0;
+            sendPager('tab');
+            return false;
+          }
+          if (e.key === 'q' || e.key === 'Q' || ((e.ctrlKey || e.metaKey) && (e.key === 'c' || e.key === 'C'))) {
+            e.preventDefault();
+            session.inputBuffer = '';
+            session.cursor = 0;
+            sendPager('q');
             return false;
           }
           // During paging, swallow all other typing so buffer is not polluted
@@ -690,15 +711,8 @@ export function useTerminalSessions(
         return;
       }
 
-      // ── Native --More-- pager mode fallback (data channel) ─────────────
+      // ── Native --More-- pager active: keys handled by custom keydown event ─
       if (session.paging) {
-        if (data === ' ') {
-          send({ type: 'pager_key', device_id: deviceId, key: 'space' });
-        } else if (data === '\r' || data === '\n' || data === '\r\n') {
-          send({ type: 'pager_key', device_id: deviceId, key: 'enter' });
-        } else if (data === 'q' || data === 'Q' || data === '\x03' || data === '\t') {
-          send({ type: 'pager_key', device_id: deviceId, key: 'q' });
-        }
         return;
       }
 
@@ -1806,6 +1820,8 @@ export function useTerminalSessions(
     };
 
     ws.onopen = () => {
+      // eslint-disable-next-line no-console
+      console.info('[CLIQ ws] connected token=%s host=%s gen=%d', token.slice(0, 8), cleanHost, currentGen);
       if (currentGen !== socketGenRef.current || ws !== wsRef.current) return;
       flushOutboundQueue();
       startHeartbeat();
@@ -1898,9 +1914,21 @@ export function useTerminalSessions(
           return;
         }
         if (session.paging) {
-          session.paging = false;
-          // Erase remaining -- More -- affordance before final output and prompt
-          session.term.write('\r\x1b[2K');
+          if (msg.prompt || msg.paging === false) {
+            session.paging = false;
+            session.inputBuffer = '';
+            session.cursor = 0;
+            // Erase remaining -- More -- affordance before final output and prompt
+            session.term.write('\r\x1b[2K');
+          } else {
+            if (msg.output) {
+              const chunk = msg.output.replace(/\n/g, '\r\n');
+              session.term.write(
+                `\r\x1b[2K\r\n${chunk}\r\n${DIM}-- More -- (Space = next page · Enter = line · Tab = quit)${RESET}`,
+              );
+            }
+            return;
+          }
         }
         clearGhost(session);
         clearHintBelow(session);
@@ -2182,7 +2210,11 @@ export function useTerminalSessions(
         // Pager finished. The final page + prompt already arrived via
         // device_output; just leave pager mode so normal input resumes.
         const session = sessionsRef.current.get(msg.device_id);
-        if (session) session.paging = false;
+        if (session) {
+          session.paging = false;
+          session.inputBuffer = '';
+          session.cursor = 0;
+        }
         return;
       }
 
@@ -2795,7 +2827,9 @@ export function useTerminalSessions(
       });
     };
 
-    ws.onclose = () => {
+    ws.onclose = (event: CloseEvent) => {
+      // eslint-disable-next-line no-console
+      console.warn('[CLIQ ws] closed code=%d reason=%s wasClean=%s gen=%d intentional=%s', event.code, event.reason, event.wasClean, currentGen, intentionalClose);
       // Session Health — BACKEND / browser-socket death detection. If the socket
       // closes without an operator-driven teardown (backend killed/crashed,
       // network drop, heartbeat/keepalive loss), the console must NOT be left

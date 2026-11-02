@@ -311,7 +311,7 @@ export type WsOutbound =
   // keystroke; the gate decision is authoritative on the server.
   | { type: 'confirm_response'; device_id: string; answer: string }
   | { type: 'suggest'; device_id: string; partial: string; seq?: number }
-  | { type: 'pager_key'; device_id: string; key: 'space' | 'enter' | 'q' }
+  | { type: 'pager_key'; device_id: string; key: 'space' | 'enter' | 'q' | 'tab' }
   // Phase 6
   | { type: 'ask'; device_id: string; question: string }
   | { type: 'recall_memory'; device_id: string; query: string }
