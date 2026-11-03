@@ -19,11 +19,18 @@ import logging
 import math
 import os
 import re
-from typing import Callable, Protocol
+import threading
+from typing import Any, Callable, Dict, Protocol
 
 log = logging.getLogger("cliq.ingest.embeddings")
 
 _TOKEN_RE = re.compile(r"[a-z0-9]+")
+
+# Global process-level caches to guarantee SentenceTransformer weights load only once
+_MODEL_CACHE: Dict[str, Any] = {}
+_MODEL_LOCK = threading.Lock()
+_EMBEDDER_CACHE: Dict[str, Embedder] = {}
+_EMBEDDER_LOCK = threading.Lock()
 
 
 def configure_offline_hf_env() -> None:
@@ -119,16 +126,21 @@ class SentenceTransformerEmbedder:
         # Always use local cache only for deterministic on-prem/offline behavior.
         # Keep parameter for API compatibility, but never permit online fetches.
         _ = local_files_only
-        try:
-            self._model = SentenceTransformer(
-                model_name,
-                local_files_only=True,
-            )
-        except Exception as exc:
-            raise RuntimeError(
-                "SentenceTransformer model is not cached locally. "
-                "Run the pre-cache step on a connected build machine, bake cache into the image, and retry."
-            ) from exc
+        with _MODEL_LOCK:
+            if model_name in _MODEL_CACHE:
+                self._model = _MODEL_CACHE[model_name]
+            else:
+                try:
+                    self._model = SentenceTransformer(
+                        model_name,
+                        local_files_only=True,
+                    )
+                    _MODEL_CACHE[model_name] = self._model
+                except Exception as exc:
+                    raise RuntimeError(
+                        "SentenceTransformer model is not cached locally. "
+                        "Run the pre-cache step on a connected build machine, bake cache into the image, and retry."
+                    ) from exc
 
         self.model_name = model_name
         if hasattr(self._model, "get_embedding_dimension"):
@@ -179,12 +191,20 @@ def get_embedder(
         raise ValueError(
             f"Unknown embedder '{name}'. Available embedders: {', '.join(available_embedders())}"
         )
-    try:
-        return factory(**kwargs)
-    except Exception as exc:
-        if allow_fallback_to_hashing:
-            log.warning("Embedder '%s' unavailable (%s); using local hashing by explicit request.", name, exc)
-            return LocalHashingEmbedder()
-        raise RuntimeError(
-            f"Failed to initialize embedder '{name}': {exc}"
-        ) from exc
+    # Cache singleton instances when default parameters are used
+    cache_key = f"{name}:{kwargs.get('model_name', 'default')}:{kwargs.get('dim', 'default')}"
+    with _EMBEDDER_LOCK:
+        if not kwargs and cache_key in _EMBEDDER_CACHE:
+            return _EMBEDDER_CACHE[cache_key]
+        try:
+            instance = factory(**kwargs)
+            if not kwargs:
+                _EMBEDDER_CACHE[cache_key] = instance
+            return instance
+        except Exception as exc:
+            if allow_fallback_to_hashing:
+                log.warning("Embedder '%s' unavailable (%s); using local hashing by explicit request.", name, exc)
+                return LocalHashingEmbedder()
+            raise RuntimeError(
+                f"Failed to initialize embedder '{name}': {exc}"
+            ) from exc

@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import re
 from typing import Any, AsyncGenerator, Dict, List, Optional
 
@@ -27,10 +28,14 @@ Cisco IOS Command Syntax Precision & Platform Rules (MANDATORY):
 1. Canonical Cisco IOS / IOS-XE Command Syntax:
    - For inspecting an interface running-configuration: ALWAYS use `show run interface <interface>` (singular, e.g. `show run interface Ethernet0/3`). NEVER output the invalid plural form `show run interfaces <interface>`.
    - Prefer standard canonical Cisco IOS/IOS-XE command forms.
-2. Platform Compatibility & Device Roles:
-   - Routers (e.g. R1, R2, node_type: router): Use valid router commands such as `show ip interface brief`, `show interfaces <interface>`, and `show interfaces description`. DO NOT recommend switch-only commands (e.g. `show interfaces status`, `show vlan brief`, `show mac address-table`, `show interfaces trunk`) on router devices.
-   - Switches (e.g. SW1, SW2, node_type: switch): Commands like `show interfaces status`, `show vlan brief`, `show mac address-table`, and `show interfaces trunk` are valid on switch devices.
-   - Always check the device platform description from the provided context header before recommending platform-specific commands.
+2. Platform Compatibility & Device-Aware Command Targeting:
+   - Device Validation: Before recommending or formatting commands, validate the vendor, platform, OS, device role, and CLI mode against the target device.
+   - Routers (e.g. R1, R2, role: router): NEVER recommend or output Cisco switchport configuration commands (`switchport mode access`, `switchport trunk allowed vlan`, `switchport access vlan`, `switchport`) for a router. If asked how to configure a switchport on a router, explicitly explain the mismatch: explain that switchport commands are Layer 2 switching commands invalid on router interfaces, and provide Layer 3 routed interface or subinterface configuration instead. DO NOT offer switchport insertion for routers.
+   - Switches (e.g. SW1, SW2, role: switch): Switchport commands, VLAN commands, and spanning-tree commands are valid and supported.
+   - Non-Cisco Vendors (e.g. Juniper Junos, Linux endpoints): NEVER output Cisco IOS-XE commands for Juniper or Linux devices. For Juniper, output native Junos syntax (e.g. `show interfaces terse`, `set interfaces ...`) in a ```junos block. Explain the vendor mismatch if asked to run Cisco commands on Juniper.
+   - Incompatibility Handling: If the target device is incompatible with the requested command, clearly explain the mismatch and do not offer insertion. NEVER silently redirect commands to another device.
+   - Interface Troubleshooting: Treat interface names (e.g. `GigabitEthernet0/1`, `eth0`) as illustrative generic examples UNLESS discovered from actual live telemetry in the context. Prefer actual interface names (e.g. `GigabitEthernet0/0`) whenever live device context is available. Clearly distinguish documentation-based suggestions from live-verified commands.
+   - OSPF & Platform Validation: Validate command compatibility against platform metadata. Distinguish exact verified syntax from documentation-only suggestions. Avoid presenting Cisco IOS-XE commands as universal networking commands; always qualify the platform.
 3. Multi-Command Sequential Code Blocks & Platform Separation:
    - When the user asks for a troubleshooting sequence, diagnostic checks, all commands together, or a workflow for sequential execution, generate ONE coherent fenced code block containing all related commands with each command on its own separate line.
    - DO NOT fragment diagnostic sequences into separate single-line blocks with prose between them. Explanations and technical rationale must go outside the code block (before or after it).
@@ -79,15 +84,170 @@ Troubleshooting Response Structure (when diagnosing incidents or routing/switchi
 6. **Expected Results**: Output that confirms resolution.
 7. **Next Steps**: Follow-up verifications.
 
+Authoritative Documentation & Grounded Knowledge (RAG):
+- When official documentation is provided under '--- AUTHORITATIVE NETWORK KNOWLEDGE (OFFICIAL DOCUMENTATION) ---':
+  1. Treat retrieved documentation as the primary authoritative source of truth for command syntax, keyword arguments, and protocol mechanisms.
+  2. Ground your explanations in the retrieved documentation. NEVER fabricate unsupported command syntax.
+  3. Clearly distinguish retrieved documentation (what the platform supports) from live device state (what the connected device is currently experiencing).
+  4. Always cite documentation sources at the end of your technical guidance under an '### Authoritative References' section (e.g. citing command name, documentation file, and official URL when available).
+
+5. Prevent Invented Configuration Values (MANDATORY):
+   - NEVER invent IP addresses (e.g. 192.168.10.1), subnet masks (e.g. 255.255.255.0), VLAN IDs, interface IDs, or routing parameters unless explicitly supplied by the operator or observed in live telemetry.
+   - Use explicit placeholders when values are not known (e.g. `<ip-address>`, `<subnet-mask>`, `<vlan-id>`, `<interface-id>`).
+   - Ask the operator for missing configuration details. Clearly separate examples from actionable configuration.
+   - Do NOT present configuration as ready to apply without required information.
+6. Separation of Command Blocks and Output Examples (MANDATORY):
+   - Render executable command syntax as ```cisco or ```bash code blocks.
+   - Render sample terminal output, logs, routing tables, and interface lists as plain text or Markdown tables.
+   - NEVER format sample output rows (e.g. output from 'show ip interface brief') as executable CLI command blocks.
+7. Citation Relevance:
+   - Retrieve sources supporting the exact recommended command. Verify platform, OS version, and CLI mode.
+   - For standard VLAN access ports (`switchport mode access`), cite Layer 2/3 switching documentation (`layer_2_3_commands.html`), NEVER 802.1X access-session documentation.
+   - Reject irrelevant citations and never claim a citation is authoritative for a command it does not document.
+
 Tone: Professional, direct, authoritative, and concise. Avoid conversational filler."""
 
 
 class CopilotOrchestrator:
     """Orchestrates AI chat completions with dynamic context assembly and persistence."""
 
-    def __init__(self, store: Optional[ConversationStore] = None):
+    def __init__(
+        self,
+        store: Optional[ConversationStore] = None,
+        retriever: Optional[Any] = None,
+    ):
         self.store = store or ConversationStore()
         self.context_service = get_network_context_service()
+        self._retriever = retriever
+
+    def set_retriever(self, retriever: Any) -> None:
+        """Inject or update the active CommandRetriever."""
+        self._retriever = retriever
+
+    def get_retriever(self) -> Optional[Any]:
+        """Get the injected retriever or lazily obtain the shared singleton."""
+        if self._retriever is not None:
+            return self._retriever
+        try:
+            from cliq.retrieval.query import get_shared_retriever
+            self._retriever = get_shared_retriever()
+        except Exception as exc:
+            log.warning("Could not obtain shared retriever: %s", exc)
+        return self._retriever
+
+    @staticmethod
+    def _is_rag_enabled() -> bool:
+        val = os.environ.get("CLIQ_RAG_ENABLED", "1").lower().strip()
+        return val in ("1", "true", "yes", "on")
+
+    @staticmethod
+    def should_retrieve_for_query(text: str) -> bool:
+        """Determine whether input requires official networking documentation retrieval."""
+        cleaned = text.strip().lower()
+        if not cleaned:
+            return False
+
+        # Exclude pure greetings, pleasantries, and meta questions about Copilot
+        greeting_patterns = [
+            r"^(?:hi|hello|hey|howdy|hola|greetings)(?:[!\s,.]|$)",
+            r"^(?:good\s+(?:morning|afternoon|evening|day))(?:[!\s,.]|$)",
+            r"^(?:thanks|thank\s+you|thx|cheers)(?:[!\s,.]|$)",
+            r"^(?:bye|goodbye|see\s+ya|farewell)(?:[!\s,.]|$)",
+            r"^(?:who\s+are\s+you|what\s+can\s+you\s+do|what\s+is\s+your\s+name)(?:[?\s,.]|$)",
+        ]
+        for pat in greeting_patterns:
+            if re.match(pat, cleaned):
+                words = cleaned.split()
+                if len(words) <= 5:
+                    return False
+
+        # CLI command verbs or common Cisco keywords
+        cisco_keywords = {
+            "show", "ip", "interface", "interfaces", "route", "routing", "ospf", "bgp",
+            "eigrp", "vlan", "trunk", "access", "switchport", "port", "ping", "traceroute",
+            "acl", "access-list", "nat", "dhcp", "dns", "arp", "mac", "stp", "spanning-tree",
+            "lldp", "cdp", "vrf", "mpls", "neighbor", "status", "brief", "running-config",
+            "config", "configure", "troubleshoot", "down", "err-disabled", "packet", "mtu"
+        }
+        tokens = set(re.findall(r"[a-z0-9\-]+", cleaned))
+        if tokens & cisco_keywords:
+            return True
+
+        # Natural language question indicators with more than 3 words
+        if any(w in cleaned for w in ["what", "how", "explain", "why", "which", "command", "difference"]):
+            return True
+
+        return False
+
+    def _retrieve_knowledge(
+        self,
+        user_text: str,
+        detected_platform: Optional[str] = None,
+        top_k: int = 5,
+    ) -> List[Any]:
+        if not self._is_rag_enabled():
+            return []
+        if not self.should_retrieve_for_query(user_text):
+            return []
+        retriever = self.get_retriever()
+        if not retriever:
+            return []
+        try:
+            from cliq.retrieval.schema import RetrievalQuery
+            top_k_env = int(os.environ.get("CLIQ_RETRIEVAL_TOP_K", str(top_k)))
+            q = RetrievalQuery(
+                input_text=user_text,
+                mode="auto",
+                platform=detected_platform,
+                top_k=top_k_env,
+                min_confidence=0.40,
+            )
+            result = retriever.query(q)
+            return result.candidates
+        except Exception as exc:
+            log.warning("Copilot RAG retrieval error (falling back to model weights): %s", exc)
+            return []
+
+    def _format_retrieved_knowledge(self, candidates: List[Any]) -> str:
+        if not candidates:
+            return ""
+        try:
+            from cliq.retrieval.query import validate_citation
+        except ImportError:
+            validate_citation = None
+
+        valid_candidates = []
+        for c in candidates:
+            if validate_citation:
+                ok, _ = validate_citation(c)
+                if not ok:
+                    continue
+            valid_candidates.append(c)
+
+        if not valid_candidates:
+            return ""
+
+        lines = [
+            "--- AUTHORITATIVE NETWORK KNOWLEDGE (OFFICIAL DOCUMENTATION) ---",
+            "The following authoritative documentation was retrieved from the official CLIQ knowledge base for this query:",
+        ]
+        for i, c in enumerate(valid_candidates, 1):
+            cmd = getattr(c, "command", "")
+            desc = getattr(c, "description", "").strip() or "Official command syntax and operational usage."
+            doc_src = getattr(c, "doc_source", "") or "Cisco IOS-XE Command Reference"
+            platform = getattr(c, "platform", "iosxe").upper()
+            mode = getattr(c, "cmd_mode", "exec")
+            match_type = getattr(c, "match_type", "semantic").title()
+            conf = getattr(c, "confidence", 0.0)
+            url = getattr(c, "source_url", "")
+
+            lines.append(f"[{i}] Command: `{cmd}`")
+            lines.append(f"    Description: {desc}")
+            lines.append(f"    Platform: Cisco {platform} (Mode: {mode}) | Source: {doc_src}")
+            if url:
+                lines.append(f"    URL: {url}")
+            lines.append(f"    Match Type: {match_type} (Confidence: {conf:.2f})")
+        return "\n".join(lines)
 
     def _assemble_context_text(
         self,
@@ -179,6 +339,14 @@ class CopilotOrchestrator:
                 if content:
                     snippet = "\n".join(content.splitlines()[:200])
                     blocks.append(f"[File: {fname}]:\n{snippet}")
+
+        # 4. Retrieve authoritative documentation from knowledge base (RAG)
+        if user_text:
+            candidates = self._retrieve_knowledge(user_text)
+            if candidates:
+                rag_block = self._format_retrieved_knowledge(candidates)
+                if rag_block:
+                    blocks.append(rag_block)
 
         return "\n\n".join(blocks)
 

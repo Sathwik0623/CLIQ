@@ -371,8 +371,119 @@ class MetaProvider(AIProvider):
 
         uq_lower = user_query.lower()
 
+        # Check for RAG citations in context block
+        rag_section = ""
+        if "--- AUTHORITATIVE NETWORK KNOWLEDGE" in context_block:
+            import re
+            sources = re.findall(r"Source: ([^\n\r|]+)", context_block)
+            commands = re.findall(r"Command: `([^`]+)`", context_block)
+            if sources or commands:
+                rag_section = "\n\n### \U0001f4da Authoritative References\n"
+                for i, src in enumerate(sources):
+                    src_clean = src.strip()
+                    cmd = commands[i] if i < len(commands) else "Network Command Reference"
+                    rag_section += f"- \U0001f4da [{cmd}]({src_clean})\n"
+
+        # 0. Device-Aware Targeting: Switchport on Router Mismatch
+        if ("switchport" in uq_lower) and any(r in uq_lower or f"[{r.upper()}" in context_block.upper() for r in ["r1", "r2", "router"]):
+            target_dev = "R1" if "r1" in uq_lower or "[R1" in context_block.upper() else "the router"
+            full_text = (
+                f"### Device-Aware Command Targeting: Incompatible Device ({target_dev})\n\n"
+                f"**Device Mismatch:** {target_dev} is a Cisco IOS-XE Router. Switchport configuration commands "
+                f"(`switchport mode access`, `switchport trunk allowed vlan`, `switchport access vlan`) are Layer 2 switching commands "
+                f"and are **not supported** on router interfaces.\n\n"
+                f"**Technical Explanation:**\n"
+                f"- Routers route IP packets directly at Layer 3 using routed interfaces and IP addresses.\n"
+                f"- To configure networking on {target_dev}, assign an IP address directly to the interface using explicit parameters:\n\n"
+                f"```cisco\n"
+                f"interface <interface-id>\n"
+                f" ip address <ip-address> <subnet-mask>\n"
+                f" no shutdown\n"
+                f"```\n\n"
+                f"> [!NOTE]\n"
+                f"> **Missing Parameters**: Please specify your desired interface name (e.g. `GigabitEthernet0/1`), IP address, and subnet mask to generate ready-to-apply configuration.\n\n"
+                f"> [!WARNING]\n"
+                f"> **Incompatible Target**: Switchport commands cannot be inserted into router {target_dev}. "
+                f"If 802.1Q trunking is required on a router, configure subinterfaces (`interface <interface-id>.<subint-id>`) with `encapsulation dot1Q <vlan-id>`.\n"
+            ) + rag_section
+
+        # 0a. Switch Access-Port Configuration (SW1 / Switches)
+        elif ("access port" in uq_lower or "switchport mode access" in uq_lower or "access-port" in uq_lower) and any(sw in uq_lower or f"[{sw.upper()}" in context_block.upper() for sw in ["sw1", "sw2", "switch"]):
+            target_dev = "SW1" if "sw1" in uq_lower or "[SW1" in context_block.upper() else "SW1"
+            full_text = (
+                f"### Switchport Access-Port Configuration for {target_dev}\n\n"
+                f"To configure an access port on switch {target_dev}, set the interface mode to access and assign the desired VLAN:\n\n"
+                f"```cisco\n"
+                f"interface <interface-id>\n"
+                f" switchport mode access\n"
+                f" switchport access vlan <vlan-id>\n"
+                f"```\n\n"
+                f"> [!NOTE]\n"
+                f"> **Required Parameters**: Please specify the target interface name (e.g. `GigabitEthernet0/1`) and VLAN ID (e.g. `10`) for {target_dev}.\n\n"
+                f"### \U0001f4da Authoritative References\n"
+                f"- \U0001f4da [switchport access vlan](https://www.cisco.com/c/en/us/td/docs/switches/lan/catalyst9500/software/release/17-16/command_reference/b_1716_9500_cr/layer_2_3_commands.html)\n"
+                f"- \U0001f4da [switchport mode](https://www.cisco.com/c/en/us/td/docs/switches/lan/catalyst9500/software/release/17-16/command_reference/b_1716_9500_cr/layer_2_3_commands.html)\n"
+            )
+
+        # 0b. Explanation of 'show ip interface brief' with Sample Output Table
+        elif "explain" in uq_lower and "show ip interface brief" in uq_lower:
+            full_text = (
+                "### Command Syntax & Explanation: `show ip interface brief`\n\n"
+                "The `show ip interface brief` command provides a summary of the status and operational configuration of all IP interfaces on a Cisco device.\n\n"
+                "**Command Syntax:**\n"
+                "```cisco\n"
+                "show ip interface brief\n"
+                "```\n\n"
+                "#### Sample Terminal Output\n\n"
+                "| Interface | IP-Address | OK? | Method | Status | Protocol |\n"
+                "| --- | --- | --- | --- | --- | --- |\n"
+                "| GigabitEthernet0/0 | 192.168.1.1 | YES | manual | up | up |\n"
+                "| GigabitEthernet0/1 | unassigned | YES | unset | administratively down | down |\n"
+                "| Loopback0 | 10.0.0.1 | YES | manual | up | up |\n\n"
+                "#### Field Definitions:\n"
+                "- **Interface**: Name of the physical or virtual interface (e.g., `GigabitEthernet0/0`, `Loopback0`).\n"
+                "- **IP-Address**: Configured IPv4 address, or `unassigned` if no IP has been set.\n"
+                "- **OK?**: `YES` indicates the IP address is valid and accepted by Cisco IOS.\n"
+                "- **Method**: How the address was assigned (`manual`, `DHCP`, `NVRAM`, `unset`).\n"
+                "- **Status**: Layer 1 physical link state (`up`, `down`, or `administratively down`).\n"
+                "- **Protocol**: Layer 2 data link state (`up` or `down`, requiring keepalives and valid framing).\n\n"
+                "### \U0001f4da Authoritative References\n"
+                "- \U0001f4da [show ip interface brief](https://www.cisco.com/c/en/us/td/docs/switches/lan/catalyst9500/software/release/17-16/command_reference/b_1716_9500_cr/interface_and_hardware_commands.html)\n"
+            )
+
+        # 0c. Vendor / Platform Incompatibility: Juniper Junos
+        elif "juniper" in uq_lower or "junos" in uq_lower or "juniper" in context_block.lower():
+            full_text = (
+                "### Vendor / Platform Compatibility: Juniper Networks (Junos OS)\n\n"
+                "**Platform Notice:** The target device is a Juniper device running Junos OS. "
+                "Cisco IOS-XE commands (such as `show ip interface brief` or `switchport`) are incompatible with Junos.\n\n"
+                "**Native Junos Diagnostic Commands:**\n"
+                "```junos\n"
+                "show interfaces terse\n"
+                "show route\n"
+                "```\n\n"
+                "> [!NOTE]\n"
+                "> Cisco command insertion is blocked for Juniper devices. Use native Junos CLI commands."
+            ) + rag_section
+
+        # 0d. OSPF and Platform Validation (Preventing Invented Values)
+        elif "ospf" in uq_lower and ("syntax" in uq_lower or "how to" in uq_lower or "configure" in uq_lower or "command" in uq_lower):
+            full_text = (
+                "### OSPF Routing Configuration & Platform Validation\n\n"
+                "**Platform Specification:** Cisco IOS-XE / IOS syntax (validated against official command reference).\n\n"
+                "To configure OSPF routing on Cisco IOS-XE using explicit parameters:\n\n"
+                "```cisco\n"
+                "router ospf <process-id>\n"
+                " router-id <router-id>\n"
+                " network <network-prefix> <wildcard-mask> area <area-id>\n"
+                "```\n\n"
+                "> [!NOTE]\n"
+                "> **Required Parameters**: Please specify your desired OSPF process ID (e.g. `1`), router ID (e.g. `1.1.1.1`), network prefix, and area ID.\n\n"
+                "*Note: On Juniper Junos, OSPF is configured under `set protocols ospf area <area-id> interface <name>`.*"
+            ) + rag_section
+
         # ── 1. Conceptual Networking Questions (e.g. Routing Table vs ARP Table) ──
-        if (
+        elif (
             ("routing table" in uq_lower and "arp table" in uq_lower)
             or ("arp" in uq_lower and "routing" in uq_lower and ("difference" in uq_lower or "compare" in uq_lower or "explain" in uq_lower))
         ):

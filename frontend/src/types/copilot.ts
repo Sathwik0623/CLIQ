@@ -39,7 +39,9 @@ export interface StoredMessage {
   role: ChatRole | string;
   content: string;
   created_at: number;
+  targetDeviceId?: string;
   metadata?: {
+    target_device_id?: string;
     context_chips?: ContextChip[];
     attachment_ids?: string[];
     model?: string;

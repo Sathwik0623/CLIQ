@@ -14,7 +14,7 @@ import sqlite3
 import uuid
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 from cliq.ingest.storage.embeddings import get_embedder
 from cliq.ingest.storage.vector_store import SQLiteVectorStore
@@ -35,13 +35,14 @@ class OperationalMemoryStore:
     SCHEMA_VERSION = "1"
     DEFAULT_MEMORY_DIR = ".cliq/memory"
 
-    def __init__(self, memory_dir: Optional[str] = None):
+    def __init__(self, memory_dir: Optional[str] = None, embedder: Optional[Any] = None):
         """
         Initialize operational memory store.
         
         Args:
             memory_dir: Path to memory store directory (default: .cliq/memory).
                        Auto-created if needed.
+            embedder: Optional shared embedder instance (prevents duplicate model loads).
         """
         self.memory_dir = Path(memory_dir or self.DEFAULT_MEMORY_DIR)
         self.memory_dir.mkdir(parents=True, exist_ok=True)
@@ -49,8 +50,8 @@ class OperationalMemoryStore:
         self.kb_path = self.memory_dir / "operational_memories.db"
         self.vec_path = self.memory_dir / "operational_memories_vectors.db"
         
-        # Initialize offline embedder (same as Phase 3.5.2)
-        self.embedder = get_embedder(
+        # Reuse shared embedder or retrieve singleton (prevents duplicate loading)
+        self.embedder = embedder or get_embedder(
             name="sentence-transformers",
             allow_fallback_to_hashing=False,
         )

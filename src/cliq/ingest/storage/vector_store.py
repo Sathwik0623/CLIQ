@@ -47,6 +47,7 @@ class VectorStore(Protocol):
     def get(self, vector_id: str) -> Optional[dict]: ...
     def delete_by_doc(self, doc_source: str) -> int: ...
     def count(self) -> int: ...
+    def get_dimension(self) -> Optional[int]: ...
     def close(self) -> None: ...
 
 
@@ -115,6 +116,10 @@ class SQLiteVectorStore:
 
     @staticmethod
     def _cosine(a: list, b: list) -> float:
+        if len(a) != len(b):
+            raise ValueError(
+                f"Vector dimension mismatch in cosine similarity: len(a)={len(a)} != len(b)={len(b)}"
+            )
         # Embeddings are stored normalised, but we normalise defensively so the
         # store works with any provider.
         dot = sum(x * y for x, y in zip(a, b))
@@ -128,6 +133,13 @@ class SQLiteVectorStore:
               where: Optional[dict] = None) -> list:
         """Return the top_k most similar records as VectorHit, optionally
         filtered by exact metadata match (e.g. {'platform': 'iosxe'})."""
+        query_dim = len(embedding)
+        stored_dim = self.get_dimension()
+        if stored_dim is not None and query_dim != stored_dim:
+            raise ValueError(
+                f"Vector dimension mismatch: query vector has {query_dim} dimensions, "
+                f"but vector index requires {stored_dim} dimensions."
+            )
         results: list[VectorHit] = []
         with self._lock:
             rows = self._conn.execute(
@@ -171,6 +183,12 @@ class SQLiteVectorStore:
     def count(self) -> int:
         with self._lock:
             return self._conn.execute("SELECT COUNT(*) FROM vectors").fetchone()[0]
+
+    def get_dimension(self) -> Optional[int]:
+        """Return the dimension of vectors stored in this database, or None if empty."""
+        with self._lock:
+            row = self._conn.execute("SELECT dim FROM vectors LIMIT 1").fetchone()
+            return int(row["dim"]) if row else None
 
     def sample(self, limit: int = 5) -> list:
         """Return up to `limit` stored records for post-ingestion spot-checks."""

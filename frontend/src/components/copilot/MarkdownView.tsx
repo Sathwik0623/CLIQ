@@ -6,7 +6,7 @@
  * copy-to-clipboard, and command explanation actions.
  */
 
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useMemo } from 'react';
 import type { Device } from '../../types/api';
 import {
   CheckIcon,
@@ -19,6 +19,7 @@ import {
 
 export interface MarkdownViewProps {
   content: string;
+  targetDeviceId?: string;
   devices?: Device[];
   openDevices?: Device[];
   activeDeviceId?: string;
@@ -42,6 +43,7 @@ export type SequenceState =
 
 export default function MarkdownView({
   content,
+  targetDeviceId,
   devices = [],
   openDevices,
   activeDeviceId,
@@ -57,11 +59,15 @@ export default function MarkdownView({
     <div className="space-y-3 text-xs leading-relaxed text-slate-200 select-text max-w-full overflow-hidden">
       {blocks.map((block, idx) => {
         if (block.type === 'code') {
+          if (isTerminalOutput(block.language, block.text)) {
+            return <OutputBlock key={idx} code={block.text} />;
+          }
           return (
             <CodeBlock
               key={idx}
               language={block.language}
               code={block.text}
+              targetDeviceId={targetDeviceId}
               devices={devices}
               openDevices={openDevices}
               activeDeviceId={activeDeviceId}
@@ -199,9 +205,91 @@ function isReadOnlySequence(lines: string[]): boolean {
   return substantive.every((l) => isReadOnlyLine(l));
 }
 
+function isTerminalOutput(language: string, code: string): boolean {
+  const lang = (language || '').toLowerCase().trim();
+  const outputLangs = [
+    'output', 'terminal-output', 'console', 'console-output',
+    'stdout', 'log', 'logs', 'table', 'sample', 'example', 'evidence', 'text',
+  ];
+  if (outputLangs.includes(lang)) return true;
+
+  const rawLines = code.trim().split(/\r?\n/).map((l) => l.trim()).filter((l) => l.length > 0);
+  if (rawLines.length === 0) return false;
+
+  // Common tabular output headers
+  const outputHeaderPatterns = [
+    /^interface\s+ip-address\s+ok\?/i,
+    /^codes:\s+[a-z]\s+-/i,
+    /^gateway of last resort/i,
+    /^vlan\s+name\s+status\s+ports/i,
+    /^port\s+name\s+status\s+vlan/i,
+    /^protocol\s+address\s+age/i,
+    /^neighbor\s+v\s+as\s+msg/i,
+    /^ip routing table/i,
+    /^total number of /i,
+    /^destination\s+gateway\s+flags/i,
+    /^line\s+user\s+host\(s\)/i,
+  ];
+
+  if (outputHeaderPatterns.some((pat) => pat.test(rawLines[0]))) {
+    return true;
+  }
+
+  // Columnar interface brief rows: e.g. "GigabitEthernet0/0 192.168.1.1 YES manual up up"
+  const interfaceBriefRow = /^(?:gigabitethernet|fastethernet|ethernet|loopback|serial|vlan|port-channel|mgmt)\S*\s+(?:unassigned|\d+\.\d+\.\d+\.\d+)\s+yes\s+/i;
+  if (rawLines.some((l) => interfaceBriefRow.test(l))) {
+    return true;
+  }
+
+  // Check if all lines are non-command lines with status keywords
+  const hasOnlyOutputLines = rawLines.every((l) => {
+    return !/^(?:show|conf|configure|interface|router|ip\s+route|ip\s+address|switchport|no|do|ping|traceroute|enable|vlan)\b/i.test(l);
+  });
+  if (hasOnlyOutputLines && rawLines.length >= 2 && rawLines.some((l) => /\b(up|down|administratively down|yes|manual|unset)\b/i.test(l))) {
+    return true;
+  }
+
+  return false;
+}
+
+function OutputBlock({ code }: { code: string }) {
+  const [copied, setCopied] = useState(false);
+  const handleCopy = () => {
+    navigator.clipboard.writeText(code);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 2000);
+  };
+
+  return (
+    <div className="my-2.5 max-w-full overflow-hidden rounded-lg border border-neutral-800 bg-[#0c0e14] shadow-md font-mono text-[11px]">
+      <div className="flex items-center justify-between border-b border-neutral-800 bg-[#141720] px-2.5 py-1 text-neutral-400">
+        <div className="flex items-center gap-1.5">
+          <TerminalIcon size={11} className="text-neutral-500" />
+          <span className="font-semibold uppercase tracking-wider text-[10px] text-neutral-400">
+            Sample Terminal Output
+          </span>
+        </div>
+        <button
+          type="button"
+          onClick={handleCopy}
+          className="flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] text-neutral-400 hover:text-neutral-200 hover:bg-neutral-800 transition"
+          title="Copy sample output"
+        >
+          {copied ? <CheckIcon size={10} className="text-emerald-400" /> : <CopyIcon size={10} />}
+          <span>{copied ? 'Copied' : 'Copy'}</span>
+        </button>
+      </div>
+      <div className="p-2.5 overflow-x-auto text-neutral-300 leading-relaxed whitespace-pre select-text">
+        {code}
+      </div>
+    </div>
+  );
+}
+
 interface CodeBlockProps {
   language: string;
   code: string;
+  targetDeviceId?: string;
   devices?: Device[];
   openDevices?: Device[];
   activeDeviceId?: string;
@@ -214,6 +302,7 @@ interface CodeBlockProps {
 function CodeBlock({
   language,
   code,
+  targetDeviceId,
   devices = [],
   openDevices,
   activeDeviceId,
@@ -230,7 +319,7 @@ function CodeBlock({
   // Active open devices: only open terminals are eligible targets
   const openDevicesList = openDevices ?? devices;
 
-  // Optional manual device override (secondary to genuine focus)
+  // Optional manual device override
   const [overrideDeviceId, setOverrideDeviceId] = useState<string | null>(null);
   const [isDeviceMenuOpen, setIsDeviceMenuOpen] = useState(false);
   const menuRef = useRef<HTMLDivElement>(null);
@@ -242,23 +331,45 @@ function CodeBlock({
     }
   }, [openDevicesList, overrideDeviceId]);
 
-  // Target device is strictly focusedDeviceId unless the user manually selected an override.
-  // P0 REQUIREMENT: NEVER fall back to devices[0] or R1 when no terminal is focused!
-  // A valid target MUST be in openDevicesList.
-  const validOverride = overrideDeviceId && openDevicesList.some((d) => d.id === overrideDeviceId) ? overrideDeviceId : null;
-  const validFocused = focusedDeviceId && openDevicesList.some((d) => d.id === focusedDeviceId) ? focusedDeviceId : null;
-  const effectiveTargetId = validOverride || validFocused || null;
+  // 1. Authoritative Target Device Resolution:
+  // Precedence:
+  // a) User's manual override on this block (overrideDeviceId)
+  // b) Bound targetDeviceId stamped on the message/response (targetDeviceId)
+  // c) Explicit device tagged in language or detected in block header (e.g. cisco:sw1 or [SW1])
+  // d) Current active/focused terminal ONLY IF no specific device was targeted
+  let intendedId = overrideDeviceId || targetDeviceId || null;
+  if (!intendedId) {
+    for (const d of devices) {
+      const lbl = d.label || d.id;
+      const esc = lbl.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      if (new RegExp(`\\[${esc}\\]|target=["']?${esc}["']?|:${esc}\\b`, 'i').test(language)) {
+        intendedId = d.id;
+        break;
+      }
+    }
+  }
+  if (!intendedId) {
+    intendedId = (focusedDeviceId && openDevicesList.some((d) => d.id === focusedDeviceId)) ? focusedDeviceId : null;
+  }
 
-  const targetDevice = effectiveTargetId ? openDevicesList.find((d) => d.id === effectiveTargetId) : null;
-  const targetLabel = targetDevice?.label || effectiveTargetId || '';
+  // Look up intended device in all devices inventory
+  const targetDevice = intendedId
+    ? devices.find((d) => d.id === intendedId || d.label.toLowerCase() === intendedId.toLowerCase())
+    : null;
+  const targetId = targetDevice ? targetDevice.id : intendedId;
+  const targetLabel = targetDevice ? (targetDevice.label || targetDevice.id) : (intendedId || '');
 
-  // Check connection status
-  const targetMetric = effectiveTargetId ? deviceMetrics?.[effectiveTargetId] : null;
-  const isDisconnected = effectiveTargetId ? (targetMetric?.status === 'disconnected' || targetMetric?.status === 'error') : false;
+  // Connection & Open Status of Intended Target:
+  // Never fall back to R1 or another device when the intended device is disconnected!
+  const isTargetOpen = targetId ? openDevicesList.some((d) => d.id === targetId) : false;
+  const targetMetric = targetId ? deviceMetrics?.[targetId] : null;
+  const isDisconnected = targetId
+    ? (!targetMetric || targetMetric.status === 'disconnected' || targetMetric.status === 'error' || !isTargetOpen)
+    : false;
 
+  const effectiveTargetId = !isDisconnected && isTargetOpen ? targetId : null;
   const isNoTerminalOpen = openDevicesList.length === 0;
-  const isTerminalOpenButNotFocused = openDevicesList.length > 0 && !effectiveTargetId;
-  const isTargetEligible = Boolean(effectiveTargetId && targetDevice && !isDisconnected);
+  const isTerminalOpenButNotFocused = openDevicesList.length > 0 && !intendedId;
 
   // Bound device ID for running sequences (stays bound to original device even if focus moves)
   const boundDeviceIdRef = useRef<string>('');
@@ -291,6 +402,68 @@ function CodeBlock({
     .filter((l) => l.length > 0);
   const isMultiCommandCli = isCli && commandLines.length > 1;
   const isReadOnly = isMultiCommandCli && isReadOnlySequence(commandLines);
+
+  // Device-aware compatibility validation
+  const deviceCompatibility = useMemo(() => {
+    if (!targetDevice) return { compatible: true, reason: '' };
+    const devType = (targetDevice.type || '').toLowerCase();
+    const devNodeType = ((targetDevice as any).node_type || '').toLowerCase();
+    const devLabel = targetDevice.label || targetDevice.id;
+    const isRouter = devType === 'router' || /^r\d+$/i.test(devLabel);
+    const isSwitch = devType === 'switch' || /^sw\d+$/i.test(devLabel);
+    const isEndpoint = devType === 'desktop' || devType === 'server' || /^pc\d+$/i.test(devLabel);
+    const isJuniper = devType.includes('juniper') || devNodeType.includes('juniper');
+
+    // 1. Switchport commands on a router
+    const hasSwitchportCmd = commandLines.some((cmd) => /\bswitchport\b/i.test(cmd));
+    if (hasSwitchportCmd && isRouter && !isSwitch) {
+      return {
+        compatible: false,
+        reason: `Switchport commands are invalid on router ${devLabel}`,
+      };
+    }
+
+    // 2. Cisco commands on Desktop / Endpoint
+    const hasCiscoCmd = commandLines.some((cmd) => /^(show\s+ip|conf\s+t|configure\s+terminal|interface\s+|router\s+|switchport\s+)/i.test(cmd));
+    if (hasCiscoCmd && isEndpoint) {
+      return {
+        compatible: false,
+        reason: `Cisco commands cannot be inserted into ${devLabel} (endpoint/PC)`,
+      };
+    }
+
+    // 3. Cisco syntax on Juniper
+    if (hasCiscoCmd && isJuniper) {
+      return {
+        compatible: false,
+        reason: `Cisco syntax cannot be inserted into Juniper device ${devLabel}`,
+      };
+    }
+
+    // 4. Missing / Unknown device metadata
+    if (!targetDevice.type && !(targetDevice as any).node_type && !targetDevice.label) {
+      return {
+        compatible: false,
+        reason: `Missing device metadata for ${devLabel}`,
+      };
+    }
+
+    return { compatible: true, reason: '' };
+  }, [targetDevice, commandLines]);
+
+  // Unresolved placeholder detection (<placeholder> or [vlan-id])
+  const hasPlaceholders = useMemo(() => {
+    return commandLines.some((cmd) => /<[a-zA-Z0-9_\-\s]+>|\[(?:vlan-id|interface-id|ip-address|subnet-mask)\]/i.test(cmd));
+  }, [commandLines]);
+
+  const isTargetEligible = Boolean(
+    targetId &&
+    targetDevice &&
+    isTargetOpen &&
+    !isDisconnected &&
+    deviceCompatibility.compatible &&
+    !hasPlaceholders
+  );
 
   // 10-state Sequential Command Insertion State Machine
   const [sequenceStatus, setSequenceStatus] = useState<SequenceState>('READY');
@@ -331,8 +504,8 @@ function CodeBlock({
 
   const handleStartSequence = () => {
     // Runtime target re-validation
-    if (!effectiveTargetId || !openDevicesList.some((d) => d.id === effectiveTargetId)) {
-      setInsertFeedback('No active terminal. Open and focus a connected terminal first.');
+    if (!targetId || !isTargetOpen) {
+      setInsertFeedback(`${targetLabel || 'Target'} terminal is not open. Open terminal first.`);
       setTimeout(() => setInsertFeedback(null), 3000);
       return;
     }
@@ -341,9 +514,19 @@ function CodeBlock({
       setTimeout(() => setInsertFeedback(null), 3000);
       return;
     }
+    if (hasPlaceholders) {
+      setInsertFeedback('Supply placeholder values first');
+      setTimeout(() => setInsertFeedback(null), 3000);
+      return;
+    }
+    if (!deviceCompatibility.compatible) {
+      setInsertFeedback(deviceCompatibility.reason);
+      setTimeout(() => setInsertFeedback(null), 3000);
+      return;
+    }
     if (!onInsertCommand || commandLines.length === 0) return;
 
-    boundDeviceIdRef.current = effectiveTargetId;
+    boundDeviceIdRef.current = targetId;
     stepSubmittedRef.current = false;
     stepOutputReceivedRef.current = false;
     setSequenceError(null);
@@ -352,7 +535,7 @@ function CodeBlock({
     setSequenceStatus('COMMAND_INSERTED');
 
     // Inserts ONLY first command into terminal buffer (NEVER auto-executes)
-    onInsertCommand(effectiveTargetId, commandLines[0]);
+    onInsertCommand(targetId, commandLines[0]);
 
     setTimeout(() => {
       if (sequenceStatusRef.current === 'COMMAND_INSERTED') {
@@ -488,14 +671,24 @@ function CodeBlock({
 
   // Single-command insert (inserts exactly one command line into target terminal buffer)
   const handleInsertSingle = (overrideDevId?: string) => {
-    const devId = overrideDevId || effectiveTargetId;
+    const devId = overrideDevId || targetId;
     if (!devId || !openDevicesList.some((d) => d.id === devId)) {
-      setInsertFeedback('No active terminal. Open and focus a connected terminal first.');
+      setInsertFeedback(`${targetLabel || 'Target'} terminal is not open. Open terminal first.`);
       setTimeout(() => setInsertFeedback(null), 3000);
       return;
     }
     if (isDisconnected) {
       setInsertFeedback(`${targetLabel} is disconnected`);
+      setTimeout(() => setInsertFeedback(null), 3000);
+      return;
+    }
+    if (hasPlaceholders) {
+      setInsertFeedback('Supply placeholder values first');
+      setTimeout(() => setInsertFeedback(null), 3000);
+      return;
+    }
+    if (!deviceCompatibility.compatible) {
+      setInsertFeedback(deviceCompatibility.reason);
       setTimeout(() => setInsertFeedback(null), 3000);
       return;
     }
@@ -514,11 +707,11 @@ function CodeBlock({
 
   // Multi-command per-line insert (inserts ONLY this specific line into target terminal buffer)
   const handleInsertSingleLine = (idx: number, lineCmd: string) => {
-    const devId = sequenceStatus !== 'READY' && boundDeviceIdRef.current ? boundDeviceIdRef.current : effectiveTargetId;
+    const devId = sequenceStatus !== 'READY' && boundDeviceIdRef.current ? boundDeviceIdRef.current : targetId;
     if (!devId || !openDevicesList.some((d) => d.id === devId)) {
       setLineInsertFeedback((prev) => ({
         ...prev,
-        [idx]: 'No active terminal. Open and focus a connected terminal first.',
+        [idx]: `${targetLabel || 'Target'} terminal is not open. Open terminal first.`,
       }));
       setTimeout(() => {
         setLineInsertFeedback((prev) => {
@@ -533,6 +726,20 @@ function CodeBlock({
       setLineInsertFeedback((prev) => ({
         ...prev,
         [idx]: `${targetLabel} is disconnected`,
+      }));
+      setTimeout(() => {
+        setLineInsertFeedback((prev) => {
+          const next = { ...prev };
+          delete next[idx];
+          return next;
+        });
+      }, 3000);
+      return;
+    }
+    if (/<[a-zA-Z0-9_\-\s]+>|\[(?:vlan-id|interface-id|ip-address|subnet-mask)\]/i.test(lineCmd)) {
+      setLineInsertFeedback((prev) => ({
+        ...prev,
+        [idx]: 'Supply placeholder values first',
       }));
       setTimeout(() => {
         setLineInsertFeedback((prev) => {
@@ -560,8 +767,9 @@ function CodeBlock({
   };
 
   const handleExplain = () => {
-    if (!onExplainCommand || !effectiveTargetId) return;
-    onExplainCommand(effectiveTargetId, cleanCode);
+    const expId = targetId || effectiveTargetId;
+    if (!onExplainCommand || !expId) return;
+    onExplainCommand(expId, cleanCode);
   };
 
   return (
@@ -608,6 +816,22 @@ function CodeBlock({
                   title={`Selected terminal ${targetLabel} is disconnected`}
                 >
                   {targetLabel} is disconnected
+                </span>
+              ) : !deviceCompatibility.compatible ? (
+                /* Target device incompatible */
+                <span
+                  className="flex items-center gap-1 px-2 py-0.5 rounded text-[10px] bg-amber-950/70 text-amber-300 border border-amber-800/60 shrink-0 select-none"
+                  title={deviceCompatibility.reason}
+                >
+                  \u26a0\ufe0f Incompatible: {deviceCompatibility.reason}
+                </span>
+              ) : hasPlaceholders ? (
+                /* Unresolved placeholders */
+                <span
+                  className="flex items-center gap-1 px-2 py-0.5 rounded text-[10px] bg-amber-950/70 text-amber-300 border border-amber-800/60 shrink-0 select-none"
+                  title="Replace <placeholder> values with actual parameters before inserting"
+                >
+                  \u26a0\ufe0f Placeholders required: Supply &lt;...&gt; values before inserting
                 </span>
               ) : !isMultiCommandCli ? (
                 /* Single Command: Compact Indicator "↵ Insert into <device>" */
@@ -1064,6 +1288,20 @@ function TextBlock({ text }: { text: string }) {
       {lines.map((line, idx) => {
         const trimmed = line.trim();
 
+        // Reference / Citation Header
+        if (
+          trimmed.startsWith('### ') &&
+          (trimmed.toLowerCase().includes('reference') || trimmed.toLowerCase().includes('documentation') || trimmed.includes('📚'))
+        ) {
+          return (
+            <div key={idx} className="pt-3 pb-1 border-t border-cyan-900/40 mt-3 flex items-center gap-1.5">
+              <span className="text-sm select-none">📚</span>
+              <h3 className="text-xs font-bold uppercase tracking-wider text-cyan-300">
+                {renderInlineStyles(trimmed.slice(4).replace('📚', '').trim())}
+              </h3>
+            </div>
+          );
+        }
         // Header 3
         if (trimmed.startsWith('### ')) {
           return (
@@ -1079,6 +1317,15 @@ function TextBlock({ text }: { text: string }) {
             <h2 key={idx} className="pt-2.5 text-sm font-bold text-neutral-100">
               {renderInlineStyles(t)}
             </h2>
+          );
+        }
+        // Citation / Reference item
+        if (trimmed.startsWith('- 📚 ') || trimmed.startsWith('* 📚 ')) {
+          return (
+            <div key={idx} className="flex items-start gap-2 pl-2 py-1 my-0.5 rounded bg-cyan-950/20 border border-cyan-900/30 text-[11.5px]">
+              <span className="text-cyan-400 select-none">📚</span>
+              <span className="flex-1 text-slate-300">{renderInlineStyles(trimmed.slice(4))}</span>
+            </div>
           );
         }
         // Bullet list item
@@ -1140,10 +1387,46 @@ function TextBlock({ text }: { text: string }) {
 }
 
 function renderInlineStyles(text: string): React.ReactNode {
-  // Regex to split bold (**text**), inline code (`code`), italics (*text*)
-  const parts = text.split(/(`[^`]+`|\*\*[^*]+\*\*|\*[^*]+\*)/g);
+  // Regex to split markdown links [text](url), bare URLs, bold (**text**), inline code (`code`), italics (*text*)
+  const parts = text.split(/(\[[^\]]+\]\(https?:\/\/[^\s)]+\)|https?:\/\/[^\s)]+|`[^`]+`|\*\*[^*]+\*\*|\*[^*]+\*)/g);
 
   return parts.map((part, i) => {
+    // Markdown link [label](url)
+    const linkMatch = part.match(/^\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)$/);
+    if (linkMatch) {
+      return (
+        <a
+          key={i}
+          href={linkMatch[2]}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="text-cyan-400 hover:text-cyan-300 underline font-medium inline-flex items-center gap-0.5 transition-colors"
+          title={`Open ${linkMatch[1]}`}
+        >
+          <span>{linkMatch[1]}</span>
+          <span className="text-[10px] select-none opacity-70">↗</span>
+        </a>
+      );
+    }
+    // Bare URL (https://...)
+    const bareUrlMatch = part.match(/^(https?:\/\/[^\s)]+)$/);
+    if (bareUrlMatch) {
+      const url = bareUrlMatch[1];
+      const display = url.length > 45 ? url.replace(/^https?:\/\/(www\.)?/, '').slice(0, 40) + '...' : url;
+      return (
+        <a
+          key={i}
+          href={url}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="text-cyan-400 hover:text-cyan-300 underline font-medium inline-flex items-center gap-0.5 transition-colors break-all"
+          title={`Open ${url}`}
+        >
+          <span>{display}</span>
+          <span className="text-[10px] select-none opacity-70">↗</span>
+        </a>
+      );
+    }
     if (part.startsWith('`') && part.endsWith('`') && part.length > 2) {
       return (
         <code

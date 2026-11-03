@@ -6,6 +6,7 @@ validator.py — Main safety validation logic.
 from __future__ import annotations
 
 import logging
+import re
 import time
 from typing import Optional
 
@@ -61,11 +62,57 @@ class SafetyValidator:
         # Step 1: Normalize command (handle do prefix, etc.)
         normalized_cmd, do_removed = self._normalize_command(ctx.command, ctx.current_mode)
 
-        # Step 2: Device-capability is ADVISORY only — never block here.
-        # The device is the source of truth for what it accepts (a Cat8000v both
-        # routes and switches, so 'vlan'/'switchport'/'ip ospf' are all valid on
-        # it). Capability now only influences SOFT suggestion ranking elsewhere;
-        # truly invalid commands are surfaced by the device's own error message.
+                # Step 2: Validate target platform and device metadata
+        plat = (ctx.device_platform or "").strip().lower()
+        if not plat or plat in ("unknown", "missing", "unspecified", "none"):
+            return SafetyVerdict(
+                valid=False,
+                verdict_type=VerdictType.UNKNOWN_COMMAND,
+                reason="Target device platform or metadata is missing/unknown. Cannot verify compatibility.",
+                severity=Severity.WARNING,
+                normalized_command=normalized_cmd,
+                suggested_action="Specify target device platform and verify compatibility before insertion.",
+            )
+
+        # Step 2b: Multi-vendor check (e.g. Juniper device receiving Cisco syntax)
+        vendor = (ctx.vendor or "").strip().lower()
+        if vendor in ("juniper", "junos") or plat in ("junos", "juniper", "juniper_vrr", "vmx") or "juniper" in plat:
+            cisco_markers = (
+                "show ip interface brief", "show running-config", "show run", "show ip route",
+                "configure terminal", "conf t", "switchport", "router ospf", "router bgp",
+                "ip route", "enable", "wr mem", "copy run start",
+            )
+            if any(normalized_cmd.startswith(m) for m in cisco_markers) or "switchport" in normalized_cmd:
+                return SafetyVerdict(
+                    valid=False,
+                    verdict_type=VerdictType.WRONG_DEVICE,
+                    reason=f"Command '{ctx.command}' is Cisco IOS-XE syntax and is incompatible with Juniper ({plat}).",
+                    severity=Severity.WARNING,
+                    normalized_command=normalized_cmd,
+                    suggested_action="Use native Juniper Junos syntax (e.g. 'show interfaces terse', 'show route').",
+                )
+
+        # Step 2c: Device Role validation (Router vs Switch - e.g. Cisco switchport commands)
+        role = (ctx.device_role or "").strip().lower()
+        is_router = (role == "router" or plat in ("iosv", "iosxr", "cisco_router") or (ctx.device_id and bool(re.match(r"^r\d+$", str(ctx.device_id), re.I))))
+        is_switch = (role == "switch" or plat in ("iosvl2", "cat9k", "cat9500", "nexus", "cisco_switch") or (ctx.device_id and bool(re.match(r"^sw\d+$", str(ctx.device_id), re.I))))
+
+        # Check for switchport configuration command (never allow on router)
+        is_switchport_cmd = (
+            normalized_cmd.startswith("switchport")
+            or " switchport" in normalized_cmd
+            or normalized_cmd.startswith("no switchport")
+        )
+        if is_switchport_cmd and is_router and not is_switch:
+            dev_name = ctx.device_id or ctx.device_platform
+            return SafetyVerdict(
+                valid=False,
+                verdict_type=VerdictType.WRONG_DEVICE,
+                reason=f"Switchport configuration commands ('{ctx.command}') are only valid on Layer 2/3 switches and are not supported on router '{dev_name}'.",
+                severity=Severity.WARNING,
+                normalized_command=normalized_cmd,
+                suggested_action="Configure Layer 3 routed interfaces or subinterfaces on the router instead of switchports.",
+            )
 
         # Step 3: Check blocklist
         is_blocked, severity_str = is_blocklisted(normalized_cmd)
@@ -184,6 +231,17 @@ class SafetyValidator:
             if normalized.startswith(prefix):
                 if current_mode == "exec":
                     return False, f"'{prefix}' commands are only valid in config mode."
+
+        # Check if an interface-level command is run in exec/enable mode
+        interface_only_prefixes = (
+            "switchport", "ip address", "no shutdown", "channel-group", "spanning-tree",
+        )
+        for prefix in interface_only_prefixes:
+            if normalized.startswith(prefix):
+                if current_mode in ("exec", "enable"):
+                    return False, f"'{prefix}' is an interface configuration command. Currently in '{current_mode}' mode."
+                elif current_mode not in self.INTERFACE_LEVEL_MODES and current_mode == "config":
+                    return False, f"'{prefix}' is an interface configuration command. Enter interface configuration mode ('interface <name>') first."
 
         # Check if an exec-only command is being run in config mode (without 'do')
         for prefix in exec_only_prefixes:

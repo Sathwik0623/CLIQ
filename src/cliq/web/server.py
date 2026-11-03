@@ -90,6 +90,38 @@ from cliq.validation.platform_rules import command_capability, platform_capabili
 log = logging.getLogger("cliq.web")
 
 
+class SensitiveDataFilter(logging.Filter):
+    """Redact authentication tokens, secrets, and keys from all logs and URLs."""
+
+    _TOKEN_RE = re.compile(r"""(?i)([?&](?:token|key|api[_-]?key|password|secret|auth)=)([^&\s'"]+)""")
+    _BEARER_RE = re.compile(r"(?i)\b(bearer|token)\s+[A-Za-z0-9._\-]{8,}")
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if isinstance(record.msg, str):
+            record.msg = self._redact(record.msg)
+        if record.args:
+            if isinstance(record.args, tuple):
+                record.args = tuple(self._redact(str(a)) if isinstance(a, str) else a for a in record.args)
+            elif isinstance(record.args, dict):
+                record.args = {k: (self._redact(str(v)) if isinstance(v, str) else v) for k, v in record.args.items()}
+        return True
+
+    @classmethod
+    def _redact(cls, text: str) -> str:
+        text = cls._TOKEN_RE.sub(r"\g<1><redacted>", text)
+        text = cls._BEARER_RE.sub(r"\g<1> <redacted>", text)
+        return text
+
+
+# Attach redaction filter
+_redact_filter = SensitiveDataFilter()
+logging.getLogger().addFilter(_redact_filter)
+logging.getLogger("uvicorn.access").addFilter(_redact_filter)
+logging.getLogger("uvicorn.error").addFilter(_redact_filter)
+logging.getLogger("cliq").addFilter(_redact_filter)
+logging.getLogger("cliq.web").addFilter(_redact_filter)
+
+
 PROMPT_RE = re.compile(r"^([\w\-.]+)(\(([^\)]+)\))?([#>])\s*$")
 
 # Control-char artifacts that must NEVER reach xterm.js: NUL (^@, \x00) and ETX
@@ -397,6 +429,13 @@ def _init_advisory_stack() -> None:
             vector_store = SQLiteVectorStore(_VEC_DB)
             retriever = CommandRetriever(sqlite_store, vector_store)
             _assistant = IntelligentCommandAssistant(retriever, enable_memory=False)
+            try:
+                from cliq.retrieval.query import set_shared_retriever
+                set_shared_retriever(retriever)
+                from cliq.ai.orchestrator import get_copilot_orchestrator
+                get_copilot_orchestrator().set_retriever(retriever)
+            except Exception as e:
+                log.warning("Could not set Copilot shared retriever: %s", e)
             
             # Verify KB record count and embedder type for diagnostics.
             try:
@@ -419,7 +458,8 @@ def _init_advisory_stack() -> None:
                 _KB_DB, _VEC_DB,
             )
         _validator = SafetyValidator()
-        _memory_store = OperationalMemoryStore()
+        _shared_emb = getattr(retriever, "embedder", None) if "retriever" in locals() else None
+        _memory_store = OperationalMemoryStore(embedder=_shared_emb)
         log.info("Phase 6 validator + memory store initialized.")
     except Exception as exc:
         log.error("Failed to init Phase 6 advisory stack: %s", exc)
@@ -2303,6 +2343,9 @@ class IntelValidateRequest(BaseModel):
     command: str
     platform: str = "iosxe"
     current_mode: str = "exec"
+    vendor: Optional[str] = "cisco"
+    device_role: Optional[str] = "router"
+    device_id: Optional[str] = None
 
 
 class IntelExplainRequest(BaseModel):
@@ -2503,6 +2546,9 @@ async def intel_validate(
         command=payload.command.strip(),
         device_platform=payload.platform,
         current_mode=payload.current_mode,
+        vendor=getattr(payload, "vendor", "cisco") or "cisco",
+        device_role=getattr(payload, "device_role", "router") or "router",
+        device_id=getattr(payload, "device_id", None),
     )
     verdict = await asyncio.to_thread(_validator.validate, ctx)
     return {

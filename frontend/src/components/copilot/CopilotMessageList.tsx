@@ -190,6 +190,7 @@ export default function CopilotMessageList({
                 <div>
                   <MarkdownView
                     content={msg.content}
+                    targetDeviceId={msg.targetDeviceId || (msg.metadata as any)?.target_device_id}
                     devices={devices}
                     openDevices={openDevices}
                     activeDeviceId={activeDeviceId}

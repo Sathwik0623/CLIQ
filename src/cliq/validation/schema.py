@@ -63,17 +63,29 @@ class ValidationContext:
     command: str
     """The command to validate (e.g., 'show ip route', 'vlan 10', 'reload')."""
 
-    device_platform: str
-    """Target device platform (iosxe, iosxr, iosv, iosvl2)."""
+    device_platform: str = "iosxe"
+    """Target device platform (iosxe, iosxr, iosv, iosvl2, junos, linux, etc.)."""
 
     current_mode: str = "exec"
     """Current CLI mode (exec, config, config-if, enable, etc.)."""
+
+    vendor: str = "cisco"
+    """Target device vendor (cisco, juniper, arista, linux, etc.)."""
+
+    device_role: str = "router"
+    """Target device role (router, switch, desktop, server, firewall)."""
+
+    device_os: Optional[str] = None
+    """Target device operating system (iosxe, ios, junos, linux)."""
+
+    device_id: Optional[str] = None
+    """Device identifier (e.g., 'r1', 'sw1', 'pc1')."""
 
     command_metadata: Optional[dict] = None
     """Optional metadata from knowledge base (platform, mode, syntax, etc.)."""
 
     def validate(self) -> None:
-        """Raise ValueError if context is invalid."""
+        """Raise ValueError if context is fundamentally invalid."""
         if not self.command or not self.command.strip():
             raise ValueError("command cannot be empty")
         if not self.device_platform or not self.device_platform.strip():

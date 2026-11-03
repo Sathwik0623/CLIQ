@@ -91,6 +91,7 @@ export default function CopilotPanel({
 
   // Abort controller ref
   const abortControllerRef = useRef<AbortController | null>(null);
+  const skipNextLoadRef = useRef<string | null>(null);
 
   // 1. Initial Load: Providers, Models & Conversations
   useEffect(() => {
@@ -136,8 +137,16 @@ export default function CopilotPanel({
 
   // 2. Load conversation messages when active conversation changes
   const loadConversation = useCallback(async (convId: string) => {
+    if (skipNextLoadRef.current === convId) {
+      skipNextLoadRef.current = null;
+      return;
+    }
     try {
       const conv = await fetchConversation(convId, token);
+      if (skipNextLoadRef.current === convId) {
+        skipNextLoadRef.current = null;
+        return;
+      }
       setMessages(conv.messages || []);
       if (conv.model) {
         setSelectedModel((prev) => {
@@ -297,12 +306,35 @@ export default function CopilotPanel({
         token
       );
       setConversations((prev) => [newConv, ...prev]);
+      skipNextLoadRef.current = newConv.id;
       setActiveConvId(newConv.id);
       convId = newConv.id;
     }
 
     const currentChips = [...contextChips];
     const currentAtts = [...attachments];
+
+    // Resolve intended target device ID for this turn:
+    // 1. Explicit device context chip
+    // 2. Mention of device label/id in user text
+    // 3. Current active/focused device at time of message creation
+    let intendedTargetId: string | undefined;
+    const deviceChip = currentChips.find((c) => c.type === 'device' && c.deviceId);
+    if (deviceChip?.deviceId) {
+      intendedTargetId = deviceChip.deviceId;
+    } else {
+      for (const d of devices) {
+        const lbl = d.label || d.id;
+        const esc = lbl.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        if (new RegExp(`\\b${esc}\\b`, 'i').test(textToSend)) {
+          intendedTargetId = d.id;
+          break;
+        }
+      }
+      if (!intendedTargetId) {
+        intendedTargetId = focusedDeviceId || activeDeviceId || undefined;
+      }
+    }
 
     // Create optimistic user message
     const userMsgId = `user_${Date.now()}`;
@@ -312,7 +344,9 @@ export default function CopilotPanel({
       role: 'user',
       content: textToSend,
       created_at: Math.floor(Date.now() / 1000),
+      targetDeviceId: intendedTargetId,
       metadata: {
+        target_device_id: intendedTargetId,
         context_chips: currentChips,
         attachment_ids: currentAtts.map((a) => a.id),
       },
@@ -326,7 +360,9 @@ export default function CopilotPanel({
       role: 'assistant',
       content: '',
       created_at: Math.floor(Date.now() / 1000),
+      targetDeviceId: intendedTargetId,
       metadata: {
+        target_device_id: intendedTargetId,
         model: selectedModel,
         provider: 'meta',
       },
@@ -351,11 +387,24 @@ export default function CopilotPanel({
         signal: abortController.signal,
         onChunk: (delta: string) => {
           setMessages((prev) =>
-            prev.map((m) =>
-              m.id === assistantMsgId
-                ? { ...m, content: m.content + delta }
-                : m
-            )
+            prev.map((m) => {
+              if (m.id === assistantMsgId) {
+                const nextContent = m.content + delta;
+                let devId = m.targetDeviceId;
+                if (!devId) {
+                  for (const d of devices) {
+                    const lbl = d.label || d.id;
+                    const esc = lbl.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+                    if (new RegExp(`\\b${esc}\\b`, 'i').test(nextContent)) {
+                      devId = d.id;
+                      break;
+                    }
+                  }
+                }
+                return { ...m, content: nextContent, targetDeviceId: devId };
+              }
+              return m;
+            })
           );
         },
         onDone: (data: any) => {

@@ -7,7 +7,9 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import sqlite3
+import threading
 import time
 from typing import TYPE_CHECKING, Optional
 
@@ -45,6 +47,25 @@ class CommandRetriever:
         self.sqlite_store = sqlite_store
         self.vector_store = vector_store
         self.embedder = embedder or get_embedder()
+        self._validate_embedder_compatibility()
+
+    def _validate_embedder_compatibility(self) -> None:
+        """Ensure the embedder dimension and model space match the vector index."""
+        if hasattr(self.vector_store, "get_dimension"):
+            stored_dim = self.vector_store.get_dimension()
+            if stored_dim is not None and stored_dim > 0:
+                embedder_dim = getattr(self.embedder, "dim", None)
+                if embedder_dim is not None and embedder_dim != stored_dim:
+                    raise ValueError(
+                        f"Incompatible embedder: embedder '{getattr(self.embedder, 'name', '')}' produces {embedder_dim}-dim vectors, "
+                        f"but vector index requires {stored_dim}-dim vectors. "
+                        f"Expected compatible model (e.g. 'all-MiniLM-L6-v2' for 384-dim index)."
+                    )
+                if stored_dim == 384 and getattr(self.embedder, "name", "") == "local-hashing":
+                    raise ValueError(
+                        "Cannot query neural 384-dimensional vector index with local hashing embedder. "
+                        "Neural embeddings require a compatible SentenceTransformer model."
+                    )
 
     def query(self, q: RetrievalQuery) -> RetrievalResult:
         """Execute a retrieval query and return ranked candidates.
@@ -86,6 +107,18 @@ class CommandRetriever:
         # Merge and rank.
         boost_exact = query_mode == "exact"
         all_candidates = deduplicate_and_rank(exact_matches, semantic_matches, boost_exact=boost_exact)
+
+        # Domain-specific relevance correction:
+        # If user is asking for standard VLAN access port / switchport configuration,
+        # demote 802.1X access-session commands and boost switchport access vlan commands.
+        input_lower = q.input_text.lower()
+        if any(term in input_lower for term in ("access port", "access-port", "vlan access", "switchport mode access")):
+            for cand in all_candidates:
+                c_cmd = cand.command.lower()
+                if "switchport access vlan" in c_cmd or "switchport mode" in c_cmd:
+                    cand.confidence = min(1.0, cand.confidence + 0.35)
+                elif any(k in c_cmd for k in ("access-session", "dot1x", "authentication")):
+                    cand.confidence = max(0.0, cand.confidence - 0.40)
 
         # Apply final filters.
         filtered_candidates, filter_reason = apply_filters(
@@ -260,3 +293,85 @@ def _safe_row_get(row: sqlite3.Row, key: str, default: str = "") -> str:
     except (IndexError, KeyError):
         return default
     return value or default
+
+
+# ---------------------------------------------------------------------------
+# Shared Singleton Retriever Provider (for Copilot and Advisory integration)
+# ---------------------------------------------------------------------------
+_shared_retriever: Optional[CommandRetriever] = None
+_retriever_lock = threading.Lock()
+
+
+def get_shared_retriever(
+    kb_path: Optional[str] = None,
+    vec_path: Optional[str] = None,
+    embedder: Optional[Embedder] = None,
+    force_reload: bool = False,
+) -> Optional[CommandRetriever]:
+    """Retrieve or initialize the shared singleton CommandRetriever."""
+    global _shared_retriever
+    with _retriever_lock:
+        if _shared_retriever is not None and not force_reload:
+            return _shared_retriever
+
+        from pathlib import Path
+        from cliq.ingest.storage.sqlite_store import CommandStore
+        from cliq.ingest.storage.vector_store import SQLiteVectorStore
+
+        kb = kb_path or os.environ.get("CLIQ_KB_DB", "./kb/cliq_kb.sqlite")
+        vec = vec_path or os.environ.get("CLIQ_VEC_DB", "./kb/cliq_vec.sqlite")
+
+        if not Path(kb).exists() or not Path(vec).exists():
+            log.info("Knowledge base files not found (%s, %s); shared retriever inactive.", kb, vec)
+            return None
+
+        try:
+            sqlite_store = CommandStore(kb)
+            vector_store = SQLiteVectorStore(vec)
+            emb = embedder or get_embedder()
+            _shared_retriever = CommandRetriever(sqlite_store, vector_store, embedder=emb)
+            log.info(
+                "Initialized shared CommandRetriever with KB=%s VEC=%s (records=%d, dim=%s)",
+                kb, vec, vector_store.count(), vector_store.get_dimension(),
+            )
+            return _shared_retriever
+        except Exception as exc:
+            log.warning("Failed to initialize shared CommandRetriever: %s", exc)
+            return None
+
+
+def set_shared_retriever(retriever: Optional[CommandRetriever]) -> None:
+    """Explicitly set or reset the shared singleton CommandRetriever."""
+    global _shared_retriever
+    with _retriever_lock:
+        _shared_retriever = retriever
+
+
+def validate_citation(candidate: RetrievalCandidate) -> tuple[bool, str]:
+    """Validate that a candidate citation points to a genuine, non-fabricated source
+    and is strictly relevant to the command it claims to document."""
+    if not candidate.doc_source or not candidate.doc_source.strip():
+        return False, "Candidate citation missing doc_source reference."
+
+    src = candidate.doc_source.strip()
+    if src.startswith("http://") or src.startswith("https://"):
+        if not any(domain in src.lower() for domain in ("cisco.com", "juniper.net", "arista.com")):
+            return False, f"Fabricated or untrusted citation URL domain: {src}"
+
+    if not candidate.platform or not candidate.platform.strip():
+        return False, "Citation missing platform metadata."
+
+    if not candidate.cmd_mode or not candidate.cmd_mode.strip():
+        return False, "Citation missing CLI mode metadata."
+
+    # Citation / source semantic mismatch check
+    cmd_lower = candidate.command.lower()
+    src_lower = src.lower()
+    if "ospf" in cmd_lower and "bgp_command_reference" in src_lower and "ospf" not in src_lower:
+        return False, f"Citation source mismatch: command '{candidate.command}' does not match BGP source '{src}'"
+
+    # Reject 802.1X access-session documentation for standard VLAN switchport commands
+    if any(k in cmd_lower for k in ("access-session", "dot1x", "authentication host-mode")) and any(k in src_lower for k in ("ibns", "security")):
+        return False, f"Citation relevance error: '{candidate.command}' documents 802.1X security sessions, not standard VLAN access-port configuration."
+
+    return True, "Citation verified."

@@ -135,10 +135,12 @@ def _layer_file(layer: str) -> Path:
 #: Patterns that look like secrets in free-form detail text. Conservative —
 #: when in doubt we redact. Order matters (key=value before bare tokens).
 _SECRET_PATTERNS: tuple[re.Pattern[str], ...] = (
+    # URL query parameters: ?token=xyz or &key=xyz
+    re.compile(r"(?i)([?&](?:token|key|api[_-]?key|password|secret|auth)=)([^&\s'\"]+)"),
     # key/token/password/secret/apikey/authorization = <value>
     re.compile(
         r"(?i)\b(api[_-]?key|apikey|token|password|passwd|pwd|secret|"
-        r"authorization|auth|x-api-key|bearer)\b\s*[:=]\s*\S+"
+        r"authorization|auth|x-api-key|bearer)\b\s*[:=]\s*(?!<redacted>)([^&\s,;]+)"
     ),
     # "Authorization: Token <value>" / "Bearer <value>" header forms
     re.compile(r"(?i)\b(bearer|token)\s+[A-Za-z0-9._\-]{8,}"),
@@ -180,6 +182,10 @@ def redact(value: Any) -> Any:
 
 def _redact_match(match: re.Match[str]) -> str:
     """Keep the field name (if any) but replace its value with ``<redacted>``."""
+    text = match.group(0)
+    qp = re.search(r"(?i)([?&](?:token|key|api[_-]?key|password|secret|auth)=)([^&\s'\"]+)", text)
+    if qp:
+        return f"{qp.group(1)}<redacted>"
     groups = match.groups()
     if groups and groups[0]:
         val = groups[0]
