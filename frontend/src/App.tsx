@@ -1,12 +1,15 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import LoginStep, { type SshConnectFields } from './components/LoginStep';
 import LabDeviceStep from './components/LabDeviceStep';
+import LabCopilotStep from './components/LabCopilotStep';
 import MainTerminalUi from './components/MainTerminalUi';
 import { postAuth, postDevices, postSshConnect, postDisconnect } from './lib/api';
+import { getAvailableLabs } from './lib/labsApi';
 import type { Device, Lab, TopologyLink, TopologyNode } from './types/api';
+import type { AvailableLab } from './types/labs';
 import { AlertTriangleIcon, CloseIcon } from './components/Icons';
 
-type Stage = 'login' | 'select' | 'terminal';
+type Stage = 'login' | 'select' | 'copilot' | 'terminal';
 
 export default function App() {
   const [stage, setStage] = useState<Stage>('login');
@@ -15,6 +18,10 @@ export default function App() {
   const [token, setToken] = useState('');
   const [userName, setUserName] = useState('');
   const [labs, setLabs] = useState<Lab[]>([]);
+  const [availableLabs, setAvailableLabs] = useState<AvailableLab[]>([]);
+  const [labsLoading, setLabsLoading] = useState(false);
+  const [labsError, setLabsError] = useState('');
+  const [highlightLabId, setHighlightLabId] = useState<string | null>(null);
   const [selectedLabId, setSelectedLabId] = useState('');
 
   const [devices, setDevices] = useState<Device[]>([]);
@@ -70,24 +77,18 @@ export default function App() {
       setReservationWarning(data.warning ?? '');
       setUnverifiedSession(data.unverified ?? false);
 
-      if (userLabs.length > 0) {
-        const firstLabId = userLabs[0].id;
-        setSelectedLabId(firstLabId);
-        try {
-          const devData = await postDevices(resolvedHost, data.token, firstLabId);
-          setDevices(devData.devices ?? []);
-          setTopologyNodes(devData.topology?.nodes ?? []);
-          setTopologyLinks(devData.topology?.links ?? []);
-          setOpenDeviceIds(new Set());
-          setActiveDeviceId('');
-          setPrecheckDeviceId(null);
-          setStage('terminal');
-          return;
-        } catch {
-          // Fall back to select stage if auto-device fetch fails
-        }
-      }
+      // Multi-lab flow: always land on the lab selector so the user chooses
+      // which lab to open. Never auto-open the first lab.
+      setSelectedLabId('');
+      setHighlightLabId(null);
+      setDevices([]);
+      setTopologyNodes([]);
+      setTopologyLinks([]);
+      setOpenDeviceIds(new Set());
+      setActiveDeviceId('');
+      setPrecheckDeviceId(null);
       setStage('select');
+      await fetchAvailableLabs(data.token);
     } catch (e) {
       // The gate failed closed (non-2xx). Stay on the login page and show the
       // real reason — never advance to the device list.
@@ -130,10 +131,26 @@ export default function App() {
     }
   }
 
+  async function fetchAvailableLabs(authToken: string) {
+    if (!authToken) return;
+    setLabsLoading(true);
+    try {
+      const data = await getAvailableLabs(authToken);
+      setAvailableLabs(data.labs ?? []);
+      setLabsError('');
+    } catch (e) {
+      setLabsError(e instanceof Error ? e.message : 'Failed to refresh labs');
+    } finally {
+      setLabsLoading(false);
+    }
+  }
+
   async function handleSelectLab(labId: string) {
     setSelectedLabId(labId);
+    setHighlightLabId(null);
     if (!host || !token) return;
     setLoading(true);
+    setError('');
     try {
       const data = await postDevices(host, token, labId);
       setDevices(data.devices ?? []);
@@ -147,6 +164,52 @@ export default function App() {
     } finally {
       setLoading(false);
     }
+  }
+
+  async function handleBackToLabs(labId: string, title: string) {
+    if (!token) return;
+    setLabs((prev) => (prev.some((l) => l.id === labId) ? prev : [...prev, { id: labId, title }]));
+    await fetchAvailableLabs(token);
+    setSelectedLabId(labId);
+    setHighlightLabId(labId);
+    setDevices([]);
+    setTopologyNodes([]);
+    setTopologyLinks([]);
+    setStage('select');
+  }
+
+  async function handleLifecycleEnded(labId: string) {
+    if (!token) return;
+    await fetchAvailableLabs(token);
+    if (labId === selectedLabId && host) {
+      try {
+        const data = await postDevices(host, token, labId);
+        setDevices(data.devices ?? []);
+        setTopologyNodes(data.topology?.nodes ?? []);
+        setTopologyLinks(data.topology?.links ?? []);
+      } catch (e) {
+        setError(e instanceof Error ? e.message : 'Failed to refresh devices');
+      }
+    }
+  }
+
+  async function handleReturnToDashboard() {
+    // Stage change unmounts the terminal UI, whose cleanup closes the shared
+    // device socket; the backend releases runtimes while RETAINING the CML
+    // session, so no re-login is needed. Local device state is reset here so
+    // nothing stale survives the switch.
+    setOpenDeviceIds(new Set());
+    setActiveDeviceId('');
+    setPrecheckDeviceId(null);
+    setDevices([]);
+    setTopologyNodes([]);
+    setTopologyLinks([]);
+    setHighlightLabId(null);
+    setError('');
+    if (token) {
+      await fetchAvailableLabs(token);
+    }
+    setStage('select');
   }
 
   async function fetchDevices() {
@@ -164,6 +227,29 @@ export default function App() {
       // Stay on 'select' so the user sees the live topology before entering the terminal.
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Failed to fetch devices');
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function handleOpenDeployedLab(labId: string, title: string) {
+    if (!host || !token) return;
+    setLoading(true);
+    setError('');
+    try {
+      const data = await postDevices(host, token, labId);
+      setLabs((prev) => (prev.some((l) => l.id === labId) ? prev : [...prev, { id: labId, title }]));
+      setSelectedLabId(labId);
+      setDevices(data.devices ?? []);
+      setTopologyNodes(data.topology?.nodes ?? []);
+      setTopologyLinks(data.topology?.links ?? []);
+      setOpenDeviceIds(new Set());
+      setActiveDeviceId('');
+      setPrecheckDeviceId(null);
+      setStage('terminal');
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Failed to open deployed lab');
+      setStage('select');
     } finally {
       setLoading(false);
     }
@@ -279,15 +365,33 @@ export default function App() {
       {stage === 'select' && (
         <LabDeviceStep
           labs={labs}
+          availableLabs={availableLabs}
+          labsLoading={labsLoading}
           selectedLabId={selectedLabId}
+          highlightLabId={highlightLabId}
           devices={devices}
           topologyNodes={topologyNodes}
           topologyLinks={topologyLinks}
           loading={loading}
           error={error}
-          onSelectLab={setSelectedLabId}
+          labsError={labsError}
+          token={token}
+          onSelectLab={handleSelectLab}
           onFetchDevices={fetchDevices}
           onOpenDevice={openDevice}
+          onPlanNewLab={() => setStage('copilot')}
+          onRefreshLabs={() => fetchAvailableLabs(token)}
+          onLifecycleEnded={handleLifecycleEnded}
+        />
+      )}
+
+      {stage === 'copilot' && (
+        <LabCopilotStep
+          token={token}
+          host={host}
+          onBack={() => setStage('select')}
+          onOpenLab={handleOpenDeployedLab}
+          onBackToLabs={handleBackToLabs}
         />
       )}
 
@@ -310,8 +414,10 @@ export default function App() {
           onCloseDevice={closeDevice}
           onSetActiveDevice={setActiveDeviceId}
           onSelectLab={handleSelectLab}
-          onChangeLab={() => setStage('select')}
+          onChangeLab={() => void handleReturnToDashboard()}
+          onShowDashboard={() => void handleReturnToDashboard()}
           onExitTerminal={handleExitTerminal}
+          onPlanNewLab={labs.length > 0 ? () => setStage('copilot') : undefined}
         />
       )}
     </div>

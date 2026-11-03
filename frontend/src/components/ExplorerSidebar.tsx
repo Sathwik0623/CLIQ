@@ -10,6 +10,7 @@
  */
 import { useState } from 'react';
 import type { Device, Lab } from '../types/api';
+import { consoleBlockedReason, isConsoleBlocked } from '../lib/deviceState';
 import {
   getDeviceIcon,
   TopologyIcon,
@@ -49,9 +50,16 @@ const MODE_ABBR: Record<string, string> = {
 };
 
 function stateColor(state?: string): string {
-  if (state === 'BOOTED' || state === 'STARTED') return '#4ec9b0';
-  if (state === 'STARTING')                       return '#cca700';
-  if (state === 'STOPPED')                        return '#858585';
+  // Green means confirmed ready (BOOTED, the SDK-verified marker) so the dot
+  // always agrees with console gating. Transitional/active states from the
+  // SDK-verified set read amber; stopped/defined read neutral gray; failure
+  // strings read red. Matching is case-insensitive; raw values stay in the
+  // tooltip untouched.
+  const clean = (state ?? '').trim().toUpperCase();
+  if (clean === 'BOOTED') return '#4ec9b0';
+  if (clean === 'STARTED' || clean === 'STARTING' || clean === 'QUEUED') return '#cca700';
+  if (clean === 'STOPPED' || clean === 'DEFINED') return '#858585';
+  if (clean.includes('FAIL') || clean.includes('ERROR')) return '#f44747';
   return '#5a5a5a';
 }
 
@@ -257,17 +265,24 @@ export default function ExplorerSidebar({
                 const isActive = device.id === activeDeviceId && !topologyActive;
                 const m = metrics[device.id];
                 const modeAbbr = m ? (MODE_ABBR[m.mode] ?? m.mode?.toUpperCase() ?? '') : '';
+                // Consoles open only for booted devices; open sessions are
+                // never stranded and unknown states stay permissive (V.3).
+                const blocked = !isOpen && isConsoleBlocked(device.node_state);
 
                 return (
                   <li key={device.id}>
                     <div
-                      className={`group flex items-center gap-2 px-3 py-1.5 cursor-pointer transition-colors ${
+                      className={`group flex items-center gap-2 px-3 py-1.5 transition-colors ${
+                        blocked
+                          ? 'opacity-50 cursor-not-allowed'
+                          : 'cursor-pointer'
+                      } ${
                         isActive
                           ? 'bg-[var(--ide-selected)] text-white'
                           : 'text-slate-300 hover:bg-[var(--ide-hover)]'
                       }`}
-                      onClick={() => onOpenDevice(device.id)}
-                      title={`Open ${device.label} terminal`}
+                      onClick={blocked ? undefined : () => onOpenDevice(device.id)}
+                      title={blocked ? consoleBlockedReason(device.node_state) : `Open ${device.label} terminal`}
                     >
                       {/* State dot */}
                       <span

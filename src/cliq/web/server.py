@@ -5896,6 +5896,11 @@ try:
     app.include_router(copilot_router)
 except ImportError:
     pass
+try:
+    from cliq.labs.routes import router as labs_router
+    app.include_router(labs_router)
+except ImportError:
+    pass
 
 
 # ── Single-port static hosting ────────────────────────────────────────────────

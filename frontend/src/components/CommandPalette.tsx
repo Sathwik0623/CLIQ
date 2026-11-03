@@ -44,6 +44,8 @@ type CommandPaletteProps = {
   onSetSplitMode?: (mode: SplitMode) => void;
   onOpenSettings?: () => void;
   onExitTerminal?: () => void;
+  onPlanNewLab?: () => void;
+  onShowDashboard?: () => void;
 };
 
 export default function CommandPalette({
@@ -60,6 +62,8 @@ export default function CommandPalette({
   onSetSplitMode,
   onOpenSettings,
   onExitTerminal,
+  onPlanNewLab,
+  onShowDashboard,
 }: CommandPaletteProps) {
   const [query, setQuery] = useState('');
   const [selectedIndex, setSelectedIndex] = useState(0);
@@ -101,6 +105,34 @@ export default function CommandPalette({
       icon: <TopologyIcon size={14} className="text-sky-400" />,
       run: () => {
         onShowTopology();
+        onClose();
+      },
+    });
+  }
+
+  // Labs: return to the dashboard without disconnecting
+  if (onShowDashboard) {
+    actions.push({
+      id: 'show-lab-dashboard',
+      title: 'Go to Lab Dashboard',
+      category: 'Labs',
+      icon: <TopologyIcon size={14} className="text-sky-400" />,
+      run: () => {
+        onShowDashboard();
+        onClose();
+      },
+    });
+  }
+
+  // Labs: plan a brand-new CML lab (no existing lab required)
+  if (onPlanNewLab) {
+    actions.push({
+      id: 'plan-new-lab',
+      title: 'Plan a New Lab with Copilot',
+      category: 'Labs',
+      icon: <TopologyIcon size={14} className="text-emerald-400" />,
+      run: () => {
+        onPlanNewLab();
         onClose();
       },
     });

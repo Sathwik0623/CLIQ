@@ -47,6 +47,8 @@ type AppBarProps = {
   onOpenSettings?: () => void;
   onExitTerminal?: () => void;
   onChangeLab?: () => void;
+  onPlanNewLab?: () => void;
+  onShowDashboard?: () => void;
   unverifiedSession?: boolean;
 };
 
@@ -68,6 +70,8 @@ export default function AppBar({
   onOpenSettings,
   onExitTerminal,
   onChangeLab,
+  onPlanNewLab,
+  onShowDashboard,
   unverifiedSession,
 }: AppBarProps) {
   return (
@@ -226,6 +230,36 @@ export default function AppBar({
         )}
 
         {/* Disconnect button */}
+        {onShowDashboard && labTitle && (
+          <button
+            onClick={onShowDashboard}
+            className="flex items-center gap-1 rounded px-2 py-1 text-xs font-semibold transition-colors cursor-pointer"
+            style={{
+              background: 'var(--ide-hover)',
+              color: '#cccccc',
+              border: '1px solid var(--ide-border)',
+            }}
+            title="Back to the lab dashboard (stays logged in)"
+          >
+            <TopologyIcon size={12} className="shrink-0" />
+            <span>All Labs</span>
+          </button>
+        )}
+        {onPlanNewLab && labTitle && (
+          <button
+            onClick={onPlanNewLab}
+            className="flex items-center gap-1 rounded px-2 py-1 text-xs font-semibold transition-colors cursor-pointer"
+            style={{
+              background: 'var(--ide-hover)',
+              color: '#75beff',
+              border: '1px solid var(--ide-border)',
+            }}
+            title="Plan a new lab with Copilot"
+          >
+            <TopologyIcon size={12} className="shrink-0" />
+            <span>New lab</span>
+          </button>
+        )}
         {onExitTerminal && (
           <button
             onClick={onExitTerminal}

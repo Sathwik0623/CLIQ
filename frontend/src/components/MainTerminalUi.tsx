@@ -48,6 +48,8 @@ type MainTerminalUiProps = {
   onSelectLab?: (labId: string) => void;
   onExitTerminal?: () => void;
   onChangeLab?: () => void;
+  onPlanNewLab?: () => void;
+  onShowDashboard?: () => void;
 };
 
 const MODE_STYLES: Record<string, { bg: string; text: string; label: string }> = {
@@ -1501,6 +1503,8 @@ export default function MainTerminalUi(props: MainTerminalUiProps) {
         onOpenSettings={() => setSettingsOpen(true)}
         onExitTerminal={props.onExitTerminal}
         onChangeLab={props.onChangeLab}
+        onPlanNewLab={props.onPlanNewLab}
+        onShowDashboard={props.onShowDashboard}
       />
 
       {/* ── Main workspace row: Explorer (left), Central Workspace (middle), Advisory (right) ── */}
@@ -2052,6 +2056,8 @@ export default function MainTerminalUi(props: MainTerminalUiProps) {
       <CommandPalette
         isOpen={commandPaletteOpen}
         onClose={() => setCommandPaletteOpen(false)}
+        onPlanNewLab={props.onPlanNewLab}
+        onShowDashboard={props.onShowDashboard}
         devices={props.allDevices}
         activeDeviceId={props.activeDeviceId}
         hasTopology={hasTopology}
