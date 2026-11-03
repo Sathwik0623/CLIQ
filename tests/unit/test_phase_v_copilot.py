@@ -452,3 +452,251 @@ def test_base_ai_provider_and_gemini_integration():
 
     gemini_entry = next(p for p in providers if p["id"] == "gemini")
     assert gemini_entry["is_default"] is False
+
+# -----------------------------------------------------------------------------
+# 8. Silent-response regression (stream shapes, empty completions, RAG outage)
+# -----------------------------------------------------------------------------
+
+def test_parse_sse_data_line_shapes():
+    from cliq.ai.providers.meta import parse_sse_data_line
+
+    chunk = parse_sse_data_line(
+        '{"choices": [{"delta": {"content": "hello"}, "finish_reason": null}],'
+        ' "model": "muse-spark-1.3"}',
+        "muse-spark-1.3",
+    )
+    assert chunk is not None and chunk.delta == "hello"
+    assert chunk.error is None and chunk.model == "muse-spark-1.3"
+
+    # Non-streaming message shape is accepted, not dropped.
+    chunk = parse_sse_data_line(
+        '{"choices": [{"message": {"role": "assistant", "content": "full answer"}}]}',
+        "muse-spark-1.3",
+    )
+    assert chunk is not None and chunk.delta == "full answer"
+
+    # In-stream API errors surface (never swallowed).
+    chunk = parse_sse_data_line(
+        '{"error": {"message": "credits exhausted", "code": 402}}',
+        "muse-spark-1.3",
+    )
+    assert chunk is not None and chunk.error is not None
+    assert "credits exhausted" in chunk.error
+    chunk = parse_sse_data_line('{"error": "boom"}', "muse-spark-1.3")
+    assert chunk is not None and "boom" in (chunk.error or "")
+
+    # [DONE] marker.
+    chunk = parse_sse_data_line("[DONE]", "muse-spark-1.3")
+    assert chunk is not None and chunk.is_finished and not chunk.delta
+
+    # Skippable frames.
+    assert parse_sse_data_line('{"choices": []}', "m") is None
+    assert parse_sse_data_line("not json", "m") is None
+    assert parse_sse_data_line("[1, 2]", "m") is None
+    assert parse_sse_data_line("", "m") is None
+
+    # Usage-only frame is kept (telemetry without content).
+    chunk = parse_sse_data_line(
+        '{"choices": [{"delta": {}, "finish_reason": null}],'
+        ' "usage": {"prompt_tokens": 3, "completion_tokens": 5, "total_tokens": 8}}',
+        "m",
+    )
+    assert chunk is not None and chunk.usage is not None
+    assert chunk.usage.total_tokens == 8 and chunk.delta == ""
+
+
+def test_interpret_non_stream_body():
+    from cliq.ai.providers.meta import interpret_non_stream_body
+
+    chunk = interpret_non_stream_body(
+        '{"choices": [{"message": {"role": "assistant", "content": "hi"}}]}',
+        200,
+        "muse-spark-1.3",
+    )
+    assert chunk.delta == "hi" and chunk.error is None
+
+    chunk = interpret_non_stream_body(
+        '{"error": {"message": "bad key"}}', 200, "m")
+    assert chunk.error is not None and "bad key" in chunk.error
+
+    chunk = interpret_non_stream_body("<html>proxy page</html>", 200, "m")
+    assert chunk.error is not None and "non-streaming" in chunk.error
+
+    chunk = interpret_non_stream_body("", 200, "m")
+    assert chunk.error is not None
+
+
+@pytest.mark.anyio
+async def test_orchestrator_empty_completion_is_visible_error():
+    """Zero chunks + zero errors must fail visibly: an error event, no
+    silent done, and no empty assistant message persisted."""
+    import tempfile
+
+    from cliq.ai.orchestrator import CopilotOrchestrator
+
+    class _SilentProvider(MetaProvider):
+        def __init__(self):
+            super().__init__(api_key=None, mock_mode=True)
+
+        async def chat_stream(self, messages, model=None, **kwargs):
+            yield StreamChunk(delta="", is_finished=True,
+                              finish_reason="stop", model=model)
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        store = ConversationStore(
+            db_path=os.path.join(tmpdir, "empty_test.sqlite"))
+        conv = store.create_conversation("Empty Case")
+        with patch("cliq.ai.orchestrator.get_provider",
+                   return_value=_SilentProvider()):
+            orchestrator = CopilotOrchestrator(store=store)
+            events = [ev async for ev in orchestrator.handle_user_message_stream(
+                conversation_id=conv.id,
+                user_text="Hello?",
+                model="muse-spark-1.3",
+                provider_id="meta",
+            )]
+        kinds = [e["type"] for e in events]
+        assert "error" in kinds
+        assert "done" not in kinds
+        errors = [e for e in events if e["type"] == "error"]
+        assert "empty response" in errors[0]["message"].lower()
+        msgs = store.get_messages(conv.id)
+        assert [m.role for m in msgs] == ["user"]
+
+
+@pytest.mark.anyio
+async def test_orchestrator_surfaces_provider_error():
+    """A provider error chunk becomes a visible error event; the failed
+    turn persists only the user message."""
+    import tempfile
+
+    from cliq.ai.orchestrator import CopilotOrchestrator
+
+    class _FailingProvider(MetaProvider):
+        def __init__(self):
+            super().__init__(api_key=None, mock_mode=True)
+
+        async def chat_stream(self, messages, model=None, **kwargs):
+            yield StreamChunk(error="credits exhausted")
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        store = ConversationStore(
+            db_path=os.path.join(tmpdir, "error_test.sqlite"))
+        conv = store.create_conversation("Error Case")
+        with patch("cliq.ai.orchestrator.get_provider",
+                   return_value=_FailingProvider()):
+            orchestrator = CopilotOrchestrator(store=store)
+            events = [ev async for ev in orchestrator.handle_user_message_stream(
+                conversation_id=conv.id,
+                user_text="Hello?",
+                model="muse-spark-1.3",
+                provider_id="meta",
+            )]
+        errors = [e for e in events if e["type"] == "error"]
+        assert errors and "credits exhausted" in errors[0]["message"]
+        assert "done" not in [e["type"] for e in events]
+        msgs = store.get_messages(conv.id)
+        assert [m.role for m in msgs] == ["user"]
+
+
+@pytest.mark.anyio
+async def test_orchestrator_survives_rag_init_failure():
+    """Broken/missing embeddings degrade RAG only: chunks still flow and
+    the assistant reply is persisted."""
+    import tempfile
+
+    from cliq.ai.orchestrator import CopilotOrchestrator
+
+    mock_prov = MetaProvider(api_key=None, mock_mode=True)
+    retriever_factory = MagicMock(
+        side_effect=RuntimeError(
+            "SentenceTransformerEmbedder requires 'sentence-transformers'"))
+    with tempfile.TemporaryDirectory() as tmpdir:
+        store = ConversationStore(
+            db_path=os.path.join(tmpdir, "rag_test.sqlite"))
+        conv = store.create_conversation("RAG Outage")
+        # NOTE: the orchestrator imports get_shared_retriever lazily from
+        # cliq.retrieval.query on every get_retriever() call, so the
+        # definition site is the correct patch target.
+        with patch("cliq.ai.orchestrator.get_provider", return_value=mock_prov), \
+                patch("cliq.retrieval.query.get_shared_retriever",
+                      retriever_factory):
+            orchestrator = CopilotOrchestrator(store=store)
+            events = [ev async for ev in orchestrator.handle_user_message_stream(
+                conversation_id=conv.id,
+                user_text="Explain show ip interface brief",
+                model="muse-spark-1.3",
+                provider_id="meta",
+            )]
+        assert retriever_factory.called, "RAG path was never attempted"
+        chunks = [e for e in events if e["type"] == "chunk"]
+        assert chunks, "no chunks flowed despite RAG outage"
+        assert "".join(c["delta"] for c in chunks).strip() != ""
+        assert events[-1]["type"] == "done"
+        msgs = store.get_messages(conv.id)
+        assert [m.role for m in msgs] == ["user", "assistant"]
+        assert msgs[1].content.strip() != ""
+
+
+@pytest.mark.anyio
+async def test_meta_worker_surfaces_instream_error():
+    """Thread/queue wiring with canned SSE (no real HTTP): partial content
+    flows, then the in-stream API error surfaces as an error chunk."""
+    from cliq.ai.providers import meta as meta_mod
+
+    class _CannedResp:
+        status_code = 200
+        ok = True
+        headers = {"content-type": "text/event-stream"}
+        lines = [
+            b'data: {"choices": [{"delta": {"content": "partial "}}]}',
+            b'data: {"error": {"message": "credits exhausted"}}',
+        ]
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def iter_lines(self):
+            return iter(self.lines)
+
+    prov = MetaProvider(api_key="TEST-KEY", mock_mode=False)
+    with patch.object(meta_mod.requests, "post", return_value=_CannedResp()):
+        chunks = [c async for c in prov.chat_stream(
+            [ChatMessage(role=ChatRole.USER, content="hi")],
+            model="muse-spark-1.3",
+        )]
+    assert chunks[0].delta == "partial " and chunks[0].error is None
+    assert chunks[-1].error is not None
+    assert "credits exhausted" in chunks[-1].error
+
+
+@pytest.mark.anyio
+async def test_meta_worker_parses_non_stream_body():
+    """A 200 non-SSE JSON body carrying a full answer becomes content."""
+    from cliq.ai.providers import meta as meta_mod
+
+    class _CannedResp:
+        status_code = 200
+        ok = True
+        headers = {"content-type": "application/json"}
+        text = '{"choices": [{"message": {"role": "assistant", "content": "whole answer"}}]}'
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def iter_lines(self):
+            raise AssertionError("non-SSE body must not be line-scanned")
+
+    prov = MetaProvider(api_key="TEST-KEY", mock_mode=False)
+    with patch.object(meta_mod.requests, "post", return_value=_CannedResp()):
+        chunks = [c async for c in prov.chat_stream(
+            [ChatMessage(role=ChatRole.USER, content="hi")],
+            model="muse-spark-1.3",
+        )]
+    assert len(chunks) == 1 and chunks[0].delta == "whole answer"

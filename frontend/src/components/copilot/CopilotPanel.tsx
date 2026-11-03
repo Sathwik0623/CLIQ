@@ -448,6 +448,19 @@ export default function CopilotPanel({
     } catch (err: any) {
       if (err.name !== 'AbortError') {
         console.error('Streaming request error:', err);
+        const detail = err instanceof Error ? err.message : String(err);
+        setMessages((prev) =>
+          prev.map((m) =>
+            m.id === assistantMsgId
+              ? {
+                  ...m,
+                  content:
+                    m.content +
+                    `\n\n> [!WARNING]\n> **Connection Error**: ${detail} \u2014 the response stream was interrupted before completing.`,
+                }
+              : m
+          )
+        );
       }
       setIsStreaming(false);
       setStreamingMsgId(null);

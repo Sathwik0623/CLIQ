@@ -30,6 +30,84 @@ from cliq.ai.provider import (
 log = logging.getLogger("cliq.ai.meta")
 
 # Default Meta API Base URL (OpenAI-compatible /v1/chat/completions)
+def parse_sse_data_line(data_str: str, target_model: str) -> Optional[StreamChunk]:
+    """Parse one SSE ``data:`` payload into a chunk, or ``None`` to skip it.
+
+    Understood shapes (OpenAI-compatible variance):
+    - ``[DONE]`` → finished marker.
+    - ``{"error": ...}`` → error chunk (mid-stream API failures such as
+      exhausted credits or model errors MUST surface, never vanish).
+    - ``{"choices": [{"delta": {"content": ...}}]}`` → content chunk.
+    - ``{"choices": [{"message": {"content": ...}}]}`` → content chunk
+      (non-streaming JSON shape echoed inside SSE by some shims).
+    Anything else (empty choices, usage-only frames, malformed JSON) → ``None``.
+    """
+    text = (data_str or "").strip()
+    if text == "[DONE]":
+        return StreamChunk(is_finished=True, finish_reason="stop")
+    try:
+        parsed = json.loads(text)
+    except (json.JSONDecodeError, ValueError):
+        return None
+    if not isinstance(parsed, dict):
+        return None
+    err = parsed.get("error")
+    if err:
+        if isinstance(err, dict):
+            detail = err.get("message") or err.get("code") or text[:200]
+        else:
+            detail = str(err)[:200]
+        return StreamChunk(error=f"Meta API error: {detail}")
+    choices = parsed.get("choices", [])
+    if not choices or not isinstance(choices, list):
+        return None
+    first = choices[0] if isinstance(choices[0], dict) else {}
+    delta = first.get("delta", {}) or {}
+    content = delta.get("content", "") if isinstance(delta, dict) else ""
+    if not content:
+        message = first.get("message", {}) or {}
+        if isinstance(message, dict):
+            content = message.get("content", "") or ""
+    finish_reason = first.get("finish_reason")
+    usage_data = parsed.get("usage")
+    usage = None
+    if isinstance(usage_data, dict) and usage_data:
+        usage = ChatUsage(
+            prompt_tokens=usage_data.get("prompt_tokens", 0),
+            completion_tokens=usage_data.get("completion_tokens", 0),
+            total_tokens=usage_data.get("total_tokens", 0),
+        )
+    if not content and not finish_reason and usage is None:
+        return None
+    return StreamChunk(
+        delta=content or "",
+        is_finished=bool(finish_reason),
+        finish_reason=finish_reason,
+        usage=usage,
+        model=parsed.get("model") or target_model,
+    )
+
+
+def interpret_non_stream_body(body_text: str, status_code: int, target_model: str) -> StreamChunk:
+    """Interpret a non-SSE 200 body: a full JSON answer becomes one chunk,
+    anything else becomes a visible error (never silent)."""
+    preview = (body_text or "")[:200]
+    try:
+        parsed = json.loads(body_text or "")
+    except (json.JSONDecodeError, ValueError):
+        return StreamChunk(
+            error=f"Meta API returned a non-streaming response (HTTP {status_code}): {preview}")
+    if isinstance(parsed, dict) and parsed.get("error"):
+        err = parsed["error"]
+        detail = (err.get("message") or err.get("code") or preview) if isinstance(err, dict) else str(err)[:200]
+        return StreamChunk(error=f"Meta API error: {detail}")
+    chunk = parse_sse_data_line(body_text or "", target_model)
+    if chunk is not None and (chunk.delta or chunk.error):
+        return chunk
+    return StreamChunk(
+        error=f"Meta API returned an unexpected non-streaming response (HTTP {status_code}): {preview}")
+
+
 DEFAULT_META_BASE_URL = "https://api.meta.ai/v1"
 
 # Model alias map to normalize any Llama or legacy model IDs to the authoritative Meta Model API endpoints
@@ -259,44 +337,49 @@ class MetaProvider(AIProvider):
                         queue.put_nowait(StreamChunk(error=f"Meta API error (HTTP {resp.status_code}): {err_text}"))
                         return
 
+                    try:
+                        content_type = resp.headers.get("content-type", "") or ""
+                    except Exception:
+                        content_type = ""
+                    if "text/event-stream" not in content_type.lower():
+                        # Not an SSE stream (compat shim / proxy page): parse
+                        # the whole body once instead of going silent.
+                        try:
+                            body_text = (resp.text or "")[:4096]
+                        except Exception:
+                            body_text = ""
+                        queue.put_nowait(interpret_non_stream_body(
+                            body_text, resp.status_code, target_model))
+                        return
+
+                    saw_data_line = False
                     for raw_line in resp.iter_lines():
                         if not raw_line:
                             continue
-                        line = raw_line.decode("utf-8").strip()
+                        try:
+                            line = raw_line.decode("utf-8").strip()
+                        except (UnicodeDecodeError, ValueError):
+                            continue
                         if not line.startswith("data:"):
                             continue
+                        saw_data_line = True
                         data_str = line[5:].strip()
                         if data_str == "[DONE]":
                             queue.put_nowait(StreamChunk(is_finished=True, finish_reason="stop"))
                             break
-
-                        try:
-                            parsed = json.loads(data_str)
-                            choices = parsed.get("choices", [])
-                            if not choices:
-                                continue
-                            delta = choices[0].get("delta", {})
-                            content = delta.get("content", "")
-                            finish_reason = choices[0].get("finish_reason")
-                            usage_data = parsed.get("usage")
-                            usage = None
-                            if usage_data:
-                                usage = ChatUsage(
-                                    prompt_tokens=usage_data.get("prompt_tokens", 0),
-                                    completion_tokens=usage_data.get("completion_tokens", 0),
-                                    total_tokens=usage_data.get("total_tokens", 0),
-                                )
-                            actual_model = parsed.get("model") or target_model
-                            chunk = StreamChunk(
-                                delta=content,
-                                is_finished=bool(finish_reason),
-                                finish_reason=finish_reason,
-                                usage=usage,
-                                model=actual_model,
-                            )
-                            queue.put_nowait(chunk)
-                        except json.JSONDecodeError:
+                        chunk = parse_sse_data_line(data_str, target_model)
+                        if chunk is None:
                             continue
+                        queue.put_nowait(chunk)
+                        if chunk.error:
+                            # In-stream API errors are terminal for this
+                            # response; surface immediately instead of
+                            # waiting on a dead stream until timeout.
+                            break
+                    if not saw_data_line:
+                        queue.put_nowait(StreamChunk(
+                            error="Meta API returned an empty event stream "
+                                  f"(HTTP {resp.status_code}): no data received."))
             except requests.exceptions.Timeout:
                 queue.put_nowait(StreamChunk(error="Request timed out while waiting for Meta API response."))
             except Exception as ex:

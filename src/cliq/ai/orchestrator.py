@@ -481,6 +481,19 @@ class CopilotOrchestrator:
 
             # 5. Persist assistant reply in conversation store
             reply_text = "".join(full_reply)
+            if not reply_text.strip():
+                # Zero content with zero errors (e.g. the provider returned
+                # an empty completion or an unparsable shape): never persist
+                # an empty assistant message or emit a silent done. The
+                # failed turn keeps only the user message, so retry works.
+                yield {
+                    "type": "error",
+                    "message": ("The model returned an empty response (no content was generated). "
+                                "This can happen when the provider rejects the request mid-stream "
+                                "(for example exhausted API credits or an unavailable model). "
+                                "Check the backend logs and provider status, then retry."),
+                }
+                return
             asst_meta = {
                 "model": chosen_model,
                 "provider": provider_id,
