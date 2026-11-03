@@ -356,6 +356,7 @@ export function useTerminalSessions(
   // Which device terminal is currently focused/active — the 💡 marker is only
   // rendered for this one so it never floats over a hidden tab.
   const focusedDeviceRef = useRef<string>('');
+  const [focusedDeviceId, setFocusedDeviceId] = useState<string | null>(null);
 
   const deviceMap = useMemo(() => new Map(devices.map((d) => [d.id, d])), [devices]);
 
@@ -885,6 +886,11 @@ export function useTerminalSessions(
             obsConfirm('gate_triggered', deviceId);
           } else {
             send({ type: 'command', device_id: deviceId, command, raw });
+            try {
+              window.dispatchEvent(
+                new CustomEvent('cliq:command_submitted', { detail: { deviceId, command } }),
+              );
+            } catch {}
             // Enter the input busy-gate: keystrokes are queued until CLIQ renders
             // the trailing prompt (device_output), so nothing interleaves with the
             // in-flight output.
@@ -1165,10 +1171,24 @@ export function useTerminalSessions(
     term.onCursorMove(() => updateLightbulbAnchor(deviceId));
     term.onScroll(() => updateLightbulbAnchor(deviceId));
 
+    // P0 — Track genuine user keyboard and mouse interaction focus
+    const handleDeviceFocus = () => {
+      if (focusedDeviceRef.current !== deviceId) {
+        focusedDeviceRef.current = deviceId;
+        setFocusedDeviceId(deviceId);
+      }
+      updateLightbulbAnchor(deviceId);
+    };
+
+    term.onKey(() => handleDeviceFocus());
+
     sessionsRef.current.set(deviceId, session);
     const mount = mountRefs.current.get(deviceId);
     if (mount && mount.childElementCount === 0) {
       term.open(mount);
+      term.element?.addEventListener('focusin', handleDeviceFocus);
+      term.element?.addEventListener('mousedown', handleDeviceFocus);
+      term.textarea?.addEventListener('focus', handleDeviceFocus);
       // Defer fit() to registerMount (fonts.ready + rAF) to avoid clipping.
 
       // ── Click-to-position caret within the current input line ──────────
@@ -1321,13 +1341,14 @@ export function useTerminalSessions(
     const ctrl = ensureReconnectCtrl(deviceId);
     clearReconnectTimers(deviceId);
     ctrl.attempt += 1;
+    const devLabel = deviceMap.get(deviceId)?.label || deviceId;
     if (ctrl.attempt > RECONNECT_MAX_ATTEMPTS) {
       ctrl.active = false; // stop auto-retry; the manual button stays available
       setReconnectBanner(deviceId, {
         phase: 'failed',
         attempt: RECONNECT_MAX_ATTEMPTS,
         maxAttempts: RECONNECT_MAX_ATTEMPTS,
-        message: 'Auto-reconnect failed. Session preserved — click Reconnect to retry.',
+        message: `The ${devLabel} console connection was lost. Check the lab state and reconnect.`,
       });
       obsReconnect('exhausted', deviceId);
       return;
@@ -1337,7 +1358,7 @@ export function useTerminalSessions(
       phase: 'retrying',
       attempt: ctrl.attempt,
       maxAttempts: RECONNECT_MAX_ATTEMPTS,
-      message: `Connection lost. Reconnecting… (attempt ${ctrl.attempt}/${RECONNECT_MAX_ATTEMPTS})`,
+      message: `The ${devLabel} console connection was lost. Reconnecting… (attempt ${ctrl.attempt}/${RECONNECT_MAX_ATTEMPTS})`,
     });
     ctrl.timer = window.setTimeout(() => doReconnectAttempt(deviceId), delay);
   }
@@ -1569,13 +1590,38 @@ export function useTerminalSessions(
       mountRefs.current.delete(deviceId);
       observersRef.current.get(deviceId)?.disconnect();
       observersRef.current.delete(deviceId);
+      // DO NOT clear focusedDeviceId here! React calls ref(null) during normal re-renders.
+      // Clearing focus here wipes focusedDeviceId on every render!
       return;
     }
     mountRefs.current.set(deviceId, element);
     const session = ensureSession(deviceId);
     if (element.childElementCount === 0) {
       session.term.open(element);
-      session.term.focus();
+      // P0: Do not auto-focus or set focusedDeviceId on mount. Require genuine user focus.
+
+      // Attach DOM focus/interaction listeners with CAPTURE phase so xterm canvas cannot swallow events
+      const handleDomFocus = () => {
+        if (focusedDeviceRef.current !== deviceId) {
+          focusedDeviceRef.current = deviceId;
+          setFocusedDeviceId(deviceId);
+        }
+        updateLightbulbAnchor(deviceId);
+      };
+      element.addEventListener('pointerdown', handleDomFocus, true);
+      element.addEventListener('mousedown', handleDomFocus, true);
+      element.addEventListener('click', handleDomFocus, true);
+      element.addEventListener('focusin', handleDomFocus, true);
+      if (session.term.textarea) {
+        session.term.textarea.addEventListener('focus', handleDomFocus, true);
+        session.term.textarea.addEventListener('focusin', handleDomFocus, true);
+      }
+      if (session.term.element) {
+        session.term.element.addEventListener('pointerdown', handleDomFocus, true);
+        session.term.element.addEventListener('mousedown', handleDomFocus, true);
+        session.term.element.addEventListener('click', handleDomFocus, true);
+        session.term.element.addEventListener('focusin', handleDomFocus, true);
+      }
     }
     // Fit only once the container has real dimensions AND the web fonts have
     // settled. Fitting too early (hidden tab / pre-font-load) yields wrong cell
@@ -1606,8 +1652,13 @@ export function useTerminalSessions(
   }
 
   function focusDevice(deviceId: string) {
+    if (!deviceId) return;
     focusedDeviceRef.current = deviceId;
-    sessionsRef.current.get(deviceId)?.term.focus();
+    setFocusedDeviceId(deviceId);
+    const session = sessionsRef.current.get(deviceId);
+    if (session) {
+      session.term.focus();
+    }
     // Re-anchor the 💡 marker to the newly focused terminal (hide it on others).
     updateLightbulbAnchor(deviceId);
   }
@@ -1690,8 +1741,22 @@ export function useTerminalSessions(
   // run it. This NEVER executes the command itself.
   const insertToTerminal = useCallback(
     (deviceId: string, text: string) => {
+      // P0: Target validation - must be open, connected, and mounted
+      const isOpen = devicesRef.current.some((d) => d.id === deviceId);
+      if (!isOpen) {
+        return;
+      }
       const session = sessionsRef.current.get(deviceId);
-      if (!session) return;
+      if (!session || session.disconnected || session.frozen) {
+        return;
+      }
+      const mount = mountRefs.current.get(deviceId);
+      if (!mount) {
+        return;
+      }
+      // P0 Safety: target must match focused device
+      focusedDeviceRef.current = deviceId;
+      setFocusedDeviceId(deviceId);
       const term = session.term;
       clearGhost(session);
       clearHintBelow(session);
@@ -1700,7 +1765,9 @@ export function useTerminalSessions(
       hintRef.current[deviceId] = null;
       const p = promptRef.current[deviceId] ?? '';
       session.promptLen = p.length + 1;
-      const clean = text.replace(/[\r\n]+/g, ' ').replace(/\s+/g, ' ').trim();
+      // Extract ONLY the first non-empty line to strictly prevent multiline concatenation
+      const rawLines = text.split(/[\r\n]+/).map((l) => l.trim()).filter((l) => l.length > 0);
+      const clean = (rawLines[0] || '').replace(/\s+/g, ' ').trim();
       session.inputBuffer = clean;
       session.cursor = clean.length;
       // Bug 4: inserted text is PLAIN editable terminal input. It must never be
@@ -1949,6 +2016,13 @@ export function useTerminalSessions(
         const authStage = detectAuthPrompt(rawOut) || detectAuthPrompt(output);
         if (authStage) {
           if (output && output.length > 0) {
+          try {
+            window.dispatchEvent(
+              new CustomEvent('cliq:command_output', {
+                detail: { deviceId: msg.device_id, output },
+              }),
+            );
+          } catch {}
             session.term.write(`\r\n${output.replace(/\n/g, '\r\n')}`);
           }
           session.inputBuffer = '';
@@ -2014,6 +2088,7 @@ export function useTerminalSessions(
             session.promptRendered = true;
             session.lastPromptText = prompt;
             logPromptTrace(msg.device_id, 'device_output', 'device_output', prompt, true, 'rendered_fresh');
+            // Prompt rendered fresh
           } else {
             session.promptRendered = true;
             session.lastPromptText = prompt;
@@ -2025,6 +2100,7 @@ export function useTerminalSessions(
               false,
               bufferHasPrompt ? 'buffer_has_prompt' : 'session_already_rendered',
             );
+            // Prompt already in buffer
           }
           // Guided config block (req 2): auto-load the next step for review.
           // ADVISORY — the engineer still presses Enter; nothing auto-runs.
@@ -2041,17 +2117,20 @@ export function useTerminalSessions(
             session.queuedInput = [];
             releaseBusy(session);
           } else {
-            // Priority 4: hard-reset the client line buffer at every command
-            // boundary so stale text can never prepend the next partial
-            // (the 'show show' / 'showshow' concatenation).
+            // Priority 4: hard-reset the client line buffer for the completed command
             session.inputBuffer = '';
             session.rawInput = false;
-            // Trailing prompt rendered → command cycle complete. Lift the input
-            // busy-gate and REPLAY any keystrokes queued during the flight (the
-            // user's own input, deferred — a queued Enter runs it now, safely
-            // after the prompt, never mid-stream).
             releaseBusy(session);
           }
+
+          // Asynchronously dispatch prompt_ready AFTER trailing prompt and buffer reset
+          setTimeout(() => {
+            try {
+              window.dispatchEvent(
+                new CustomEvent('cliq:prompt_ready', { detail: { deviceId: msg.device_id, prompt } }),
+              );
+            } catch {}
+          }, 30);
         } else {
           promptRef.current[msg.device_id] = '';
           session.promptLen = 0;
@@ -2172,6 +2251,13 @@ export function useTerminalSessions(
         // must never render a symbol.
         const clean = stripDisplayCtrl(msg.chunk ?? '');
         if (!clean) return;
+        try {
+          window.dispatchEvent(
+            new CustomEvent('cliq:command_output', {
+              detail: { deviceId: msg.device_id, chunk: clean },
+            }),
+          );
+        } catch {}
         const chunk = clean.replace(/\r\n/g, '\n').replace(/\n/g, '\r\n');
         if (!chunk) return;
         if (!session.streaming) {
@@ -2434,11 +2520,12 @@ export function useTerminalSessions(
               const text = msg.message ?? '⚡ CLIQ: Device disconnected — reconnect to continue.';
               session.term.write(`\r\n\x1b[33m${text}\x1b[0m\r\n`);
             }
+            const devLabel = deviceMap.get(msg.device_id)?.label || msg.device_id;
             setReconnectBanner(msg.device_id, {
               phase: 'failed',
               attempt: 0,
               maxAttempts: RECONNECT_MAX_ATTEMPTS,
-              message: 'Device disconnected. Click Reconnect to resume.',
+              message: msg.message || `The ${devLabel} console connection was lost. Check the lab state and reconnect.`,
             });
           }
           setMetrics((current) => ({
@@ -2926,6 +3013,11 @@ export function useTerminalSessions(
         inFlightConnectsRef.current.delete(devId);
       }
     }
+    // P0: Clear focusedDeviceId if the focused device is no longer open
+    if (focusedDeviceRef.current && !currentDeviceIds.has(focusedDeviceRef.current)) {
+      focusedDeviceRef.current = '';
+      setFocusedDeviceId(null);
+    }
   }, [devices, token]);
 
   useEffect(() => {
@@ -3017,5 +3109,6 @@ export function useTerminalSessions(
     lightbulbAnchor, openLightbulbOverlay,
     authPrompt, submitAuth, cancelAuth,
     reconnectBanners, reconnect,
+    focusedDeviceId,
   };
 }

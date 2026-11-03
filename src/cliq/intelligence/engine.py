@@ -60,6 +60,55 @@ def _head_is_exec_only(expanded_command: str) -> bool:
 # as "Unknown command". (Bug 2 / Bug 3.)
 _PASSTHROUGH_CMDS = {"exit", "end", "quit", "disable", "logout"}
 
+# ---------------------------------------------------------------------------
+# Platform-Aware Command Validation (Linux hosts vs Cisco IOS/IOS-XE devices)
+# ---------------------------------------------------------------------------
+
+_LINUX_PLATFORMS = frozenset({
+    "desktop", "server", "host", "linux", "ubuntu", "alpine", "coreos", "centos", "debian"
+})
+
+_LINUX_COMMAND_HEADS = frozenset({
+    "hostname", "uname", "ip", "ifconfig", "ping", "ping6", "traceroute", "tracepath",
+    "route", "netstat", "ss", "arp", "cat", "ls", "pwd", "whoami", "id", "df",
+    "free", "ps", "top", "htop", "systemctl", "service", "journalctl", "dmesg",
+    "sudo", "su", "curl", "wget", "nc", "netcat", "tcpdump", "dig", "nslookup",
+    "echo", "grep", "egrep", "fgrep", "awk", "sed", "tail", "head", "less", "more",
+    "iptables", "nftables", "ufw", "ethtool", "brctl", "clear", "reset", "exit",
+    "find", "which", "whereis", "touch", "mkdir", "rm", "cp", "mv", "chmod", "chown",
+    "nano", "vim", "vi", "tar", "gzip", "apt", "apt-get", "yum", "dnf", "apk",
+    "reboot", "poweroff", "shutdown", "history", "alias", "export", "source", "env",
+})
+
+_LINUX_ONLY_HEADS = frozenset({
+    "uname", "cat", "ls", "pwd", "whoami", "id", "df", "free", "sudo", "apt",
+    "apt-get", "yum", "dnf", "systemctl", "service", "journalctl", "dmesg",
+    "htop", "ifconfig", "ethtool", "touch", "mkdir", "chmod", "chown",
+})
+
+_CISCO_SPECIFIC_HEADS = frozenset({
+    "show", "configure", "conf", "enable", "disable", "switchport", "spanning-tree",
+    "vlan", "router", "line", "crypto", "banner", "boot",
+})
+
+
+def is_linux_device(device_type: str = "", prompt: str = "") -> bool:
+    """Return True if the target device is a Linux host/endpoint (PC/Server)."""
+    dt = (device_type or "").strip().lower()
+    if any(lp == dt or dt.startswith(lp) for lp in _LINUX_PLATFORMS):
+        return True
+    p = (prompt or "").strip()
+    if p:
+        # Match standard Linux shell prompt shapes like 'PC1:~$', 'cisco@Server1:~$', 'root@host:~#'
+        if (
+            p.endswith("$")
+            or ":~$" in p
+            or ":~#" in p
+            or ("@" in p and (p.endswith("$") or p.endswith("#")))
+        ):
+            return True
+    return False
+
 
 @dataclass
 class Analysis:
@@ -100,16 +149,16 @@ class IntelligenceEngine:
         self.arg_validator = ArgValidator(command_db)
 
     def analyze(self, user_input: str, mode: str = "exec", is_executing: bool = False,
-               device_type: str = "") -> Analysis:
+               device_type: str = "", prompt: str = "") -> Analysis:
         """Public entry point. Runs the analysis pipeline and stamps a stable
         `input_key` on the result so each emitted warning event is tied to the
         exact input that produced it (enabling match-and-replace on the UI)."""
-        result = self._analyze(user_input, mode, is_executing, device_type)
+        result = self._analyze(user_input, mode, is_executing, device_type, prompt)
         result.input_key = compute_input_key(user_input, mode)
         return result
 
     def _analyze(self, user_input: str, mode: str = "exec", is_executing: bool = False,
-               device_type: str = "") -> Analysis:
+               device_type: str = "", prompt: str = "") -> Analysis:
         # ---- Pipe pass-through: analyze the part before '|', append the rest ----
         pipe_suffix = ""
         pipe_tail_raw = ""        # original text after '|' (preserves user's spacing)
@@ -119,6 +168,74 @@ class IntelligenceEngine:
             pipe_tail_raw = tail
             pipe_suffix = " |" + (" " + tail.strip() if tail.strip() else "")
             user_input = head.rstrip()
+
+        stripped = user_input.strip()
+        cmd_head = (stripped.split() or [""])[0].lower()
+
+        # ---- Platform-Aware Validation: Linux Hosts vs Cisco IOS ----
+        if is_linux_device(device_type, prompt):
+            # When on a Linux device (PC/Server):
+            # 1. Cisco-specific commands (show, conf t, switchport, etc.) are flagged
+            if cmd_head in _CISCO_SPECIFIC_HEADS:
+                cisco_to_linux_hint = {
+                    "show": "On Linux, use 'ip addr', 'ip route', 'cat', or other shell utilities.",
+                    "configure": "On Linux, configuration is performed via system configuration files or netplan.",
+                    "conf": "On Linux, configuration is performed via system configuration files or netplan.",
+                    "enable": "On Linux, use 'sudo' or 'su' for superuser privileges.",
+                    "switchport": "Switchport is a Cisco IOS command; Linux hosts do not support switchports.",
+                    "spanning-tree": "Spanning-tree is a Cisco L2 switch command.",
+                    "vlan": "VLAN interfaces on Linux are configured via 'ip link add link ... type vlan'.",
+                    "router": "Routing on Linux is managed by the kernel IP stack or routing daemons (FRR/BIRD).",
+                }.get(cmd_head, "This command is specific to Cisco IOS.")
+                return Analysis(
+                    raw_input=user_input + pipe_suffix,
+                    mode=mode,
+                    status="wrong_device",
+                    pipe_suffix=pipe_suffix,
+                    explanation=ErrorExplanation(
+                        error_type="wrong_device",
+                        what=f"'{cmd_head}' is a Cisco IOS command.",
+                        why=f"Target device is a Linux host ({device_type or 'PC/Server'}).",
+                        how=cisco_to_linux_hint,
+                    ),
+                )
+            # 2. Linux commands (hostname, uname, ip addr, ifconfig, cat, etc.) are valid
+            return Analysis(
+                raw_input=user_input + pipe_suffix,
+                mode=mode,
+                status="ok",
+                is_complete=True,
+                expanded_command=stripped,
+                pipe_suffix=pipe_suffix,
+            )
+
+        # ---- Platform-Aware Validation: Cisco IOS Devices ----
+        # If the user types a Linux-only command (uname, sudo, apt, etc.) on Cisco IOS:
+        if cmd_head in _LINUX_ONLY_HEADS:
+            linux_to_cisco_hint = {
+                "uname": "On Cisco IOS, use 'show version' to inspect device and software details.",
+                "cat": "On Cisco IOS, use 'more <filesystem>:<file>' to view files.",
+                "ls": "On Cisco IOS, use 'dir' to list files in flash/nvram.",
+                "pwd": "On Cisco IOS, use 'pwd' or 'dir' to inspect working directory.",
+                "ifconfig": "On Cisco IOS, use 'show ip interface brief' to check interfaces.",
+                "sudo": "On Cisco IOS, enter privileged EXEC mode with 'enable'.",
+                "apt": "Cisco IOS is an embedded network operating system and does not use apt.",
+                "apt-get": "Cisco IOS is an embedded network operating system and does not use apt.",
+                "yum": "Cisco IOS is an embedded network operating system and does not use yum.",
+                "systemctl": "Cisco IOS processes are inspected using 'show processes cpu'.",
+            }.get(cmd_head, "Use Cisco IOS commands like 'show version', 'show ip interface brief', etc.")
+            return Analysis(
+                raw_input=user_input + pipe_suffix,
+                mode=mode,
+                status="wrong_device",
+                pipe_suffix=pipe_suffix,
+                explanation=ErrorExplanation(
+                    error_type="wrong_device",
+                    what=f"'{cmd_head}' is a Linux shell command.",
+                    why="Target device is running Cisco IOS / IOS-XE.",
+                    how=linux_to_cisco_hint,
+                ),
+            )
 
         # ---- 'do <cmd>' prefix from a config mode targets exec/enable ----
         stripped = user_input.lstrip()

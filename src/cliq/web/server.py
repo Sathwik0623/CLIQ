@@ -2056,9 +2056,12 @@ def _build_live_hint(analysis) -> dict[str, Any] | None:
         # ghost-text completion still flows live. Stay silent here.
         return None
     if status == "wrong_device":
+        msg = e.what if e else "Not available on this device type."
+        if e and e.how:
+            msg = f"{e.what} {e.how}"
         return {
             "kind": "wrong_device",
-            "message": e.what if e else "Not available on this device type.",
+            "message": msg,
             "fix": None,
         }
     if status == "wrong_mode":
@@ -3214,13 +3217,27 @@ async def ws_terminal(websocket: WebSocket, token: str, host: str) -> None:
             pass
         # Clean, actionable UI notice over the EXISTING channel (never a hang, empty
         # stream, or silent drop). Surfaces in the SAME terminal as a reconnect prompt.
+        meta = DEVICES_BY_TOKEN.get(token, {}).get(device_id, {})
+        dev_label = meta.get("label", device_id)
+        # P1 — Clear distinction between CML connection loss reasons
+        if rv in ("auth_expired", "token_expired", "401") or "auth" in rv:
+            clean_msg = "Your CML authentication has expired. Sign in again to reconnect."
+        elif rv in ("lab_stopped", "stopped") or "stopped" in rv:
+            clean_msg = "This CML lab is currently stopped. Start the lab in CML, then retry."
+        elif rv in ("lab_not_found", "lab_deleted") or "deleted" in rv:
+            clean_msg = "This lab is no longer available. Select an available lab."
+        elif rv in ("timeout", "unreachable") or "timeout" in rv:
+            clean_msg = "CLIQ could not reach the CML console. Check your connection and try again."
+        else:
+            clean_msg = f"The {dev_label} console connection was lost. Check the lab state and reconnect."
+
         await websocket.send_json(
             {
                 "type": "session_expired",
                 "device_id": device_id,
                 "reason": rv,
                 "prompt_last_seen": prompt_last_seen or runtime.prompt or "",
-                "message": "Device session expired or unreachable — please reconnect.",
+                "message": clean_msg,
                 "session_gen": runtime.session_gen,
                 "seq": runtime.next_seq(),
             }
@@ -3649,16 +3666,32 @@ async def ws_terminal(websocket: WebSocket, token: str, host: str) -> None:
             return
         except Exception as exc:
             _CONSOLE_LOCKS.pop(meta.get("console_path", ""), None)
-            # A busy/occupied console line (single-session terminal server) gets
-            # a distinct title so the operator knows it is NOT a wrong password.
             busy = isinstance(exc, ConsoleBusyError)
+            err_text = str(exc).lower()
+            label = meta.get("label", device_id)
+            if "timeout" in err_text or "timed out" in err_text:
+                clean_what = "Connection timeout"
+                clean_how = "CLIQ could not reach the CML console. Check your connection and try again."
+            elif "auth" in err_text or "401" in err_text or "permission denied" in err_text:
+                clean_what = "Authentication expired"
+                clean_how = "Your CML authentication has expired. Sign in again to reconnect."
+            elif "stopped" in err_text:
+                clean_what = "Lab stopped"
+                clean_how = "This CML lab is currently stopped. Start the lab in CML, then retry."
+            elif busy:
+                clean_what = "Console in use"
+                clean_how = str(exc)
+            else:
+                clean_what = "Console disconnected"
+                clean_how = f"The {label} console connection was lost. Check the lab state and reconnect."
+
             await websocket.send_json(
                 {
                     "type": "error_panel",
                     "device_id": device_id,
                     "errorType": "wrong_mode",
-                    "what": "Console in use" if busy else "Connection failed",
-                    "how": str(exc),
+                    "what": clean_what,
+                    "how": clean_how,
                 }
             )
             return
@@ -4375,7 +4408,7 @@ async def ws_terminal(websocket: WebSocket, token: str, host: str) -> None:
         # Safety validation before execution: uses legacy engine (fast, 195 commands).
         # NOT used for Q&A (which uses Phase 6 assistant with 1713 KB).
         analysis = _engine.analyze(command, runtime.mode, is_executing=True,
-                                   device_type=runtime.node_type)
+                                   device_type=runtime.node_type, prompt=runtime.prompt)
 
         # Stable id of the input that produced this analysis. Every warning we
         # emit below carries it so the frontend can MATCH-AND-REPLACE the panel
@@ -5239,7 +5272,7 @@ async def ws_terminal(websocket: WebSocket, token: str, host: str) -> None:
                 if runtime and partial.strip():
                     analysis = _engine.analyze(
                         partial, runtime.mode, is_executing=True,
-                        device_type=runtime.node_type,
+                        device_type=runtime.node_type, prompt=runtime.prompt,
                     )
                     # Tiered ghost text: device '?'-help tokens (Tier 1,
                     # authoritative for the live device) first, then the index
@@ -5809,6 +5842,14 @@ def _release_socket_registrations(token: str) -> None:
             connection_type="ssh", grace_ttl_s=_SESSION_GRACE_TTL_S,
             detail=token[:8],
         )
+
+
+# ── AI Copilot Endpoints (Phase V) ───────────────────────────────────────────
+try:
+    from cliq.web.copilot_routes import router as copilot_router
+    app.include_router(copilot_router)
+except ImportError:
+    pass
 
 
 # ── Single-port static hosting ────────────────────────────────────────────────

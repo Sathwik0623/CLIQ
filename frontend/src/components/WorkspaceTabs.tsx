@@ -19,6 +19,7 @@ import { getDeviceIcon, TopologyIcon, CloseIcon } from './Icons';
 type WorkspaceTabsProps = {
   openDevices: Device[];
   activeDeviceId: string;
+  focusedDeviceId?: string | null;
   metrics: Record<string, { mode: string; status: string } | undefined>;
   hasTopology: boolean;
   topologyActive: boolean;
@@ -47,6 +48,7 @@ function connDotColor(status?: string): string {
 export default function WorkspaceTabs({
   openDevices,
   activeDeviceId,
+  focusedDeviceId,
   metrics,
   hasTopology,
   topologyActive,
@@ -68,7 +70,8 @@ export default function WorkspaceTabs({
     >
       {/* ── Open Device Terminal Tabs ── */}
       {openDevices.map((device) => {
-        const isActive = device.id === activeDeviceId && !topologyActive;
+        const isFocused = device.id === focusedDeviceId;
+        const isActive = (focusedDeviceId ? isFocused : device.id === activeDeviceId) && !topologyActive;
         const m = metrics[device.id];
         const modeLabel = m ? (MODE_LABEL[m.mode] ?? '') : '';
 
@@ -109,6 +112,20 @@ export default function WorkspaceTabs({
               >
                 {device.label}
               </span>
+
+              {/* Focused badge */}
+              {isFocused && (
+                <span
+                  className="rounded px-1 py-0.2 text-[8.5px] font-mono font-semibold"
+                  style={{
+                    background: 'rgba(56,189,248,0.2)',
+                    color: '#38bdf8',
+                    border: '1px solid rgba(56,189,248,0.4)',
+                  }}
+                >
+                  Focused
+                </span>
+              )}
 
               {/* Mode badge */}
               {modeLabel && (

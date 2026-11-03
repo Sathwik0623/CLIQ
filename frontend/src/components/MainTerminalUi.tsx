@@ -1,10 +1,11 @@
-import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import { useEffect, useMemo, useRef, useState, useCallback, type ReactNode } from 'react';
 import ReactFlow, { Background, Controls, MarkerType, type Edge, type Node } from 'reactflow';
 import 'reactflow/dist/style.css';
 import type { Device, Lab, IntelAnswerItem, IntelExplainItem, IntelMemoryItem, IntelPanelItem, IntelReference, IntelResult, IntelSequenceStep, IntelToolkit, TopologyLink, TopologyNode } from '../types/api';
 import { useTerminalSessions } from '../lib/useTerminalSessions';
 import type { ReconnectInfo } from '../lib/useTerminalSessions';
 import AppBar, { type SplitMode } from './AppBar';
+import CopilotPanel from './copilot/CopilotPanel';
 import ExplorerSidebar from './ExplorerSidebar';
 import WorkspaceTabs from './WorkspaceTabs';
 import StatusBar from './StatusBar';
@@ -118,7 +119,7 @@ function isValidInterfaceName(name?: string | null): boolean {
 
   // Real interface pattern matching
   if (VALID_IFACE_REGEX.test(trimmed)) return true;
-  if (/^(?:LAN|WAN|port\s*\d+|slot\s*\d+|mgmt)$/i.test(trimmed)) return true;
+  if (/^(?:LAN|WAN|port(?:\s*\d+)?|slot\s*\d+|mgmt)$/i.test(trimmed)) return true;
 
   return false;
 }
@@ -1033,6 +1034,7 @@ export default function MainTerminalUi(props: MainTerminalUiProps) {
   const [intelPanelOpen, setIntelPanelOpen] = useState<boolean>(
     () => !readPersistedFlag('cliq.advisory.collapsed', true),
   );
+  const [copilotOpen, setCopilotOpen] = useState<boolean>(false);
   const isDraggingRef = useRef(false);
 
   const {
@@ -1044,6 +1046,7 @@ export default function MainTerminalUi(props: MainTerminalUiProps) {
     authPrompt, submitAuth, cancelAuth,
     requestEnable,
     reconnectBanners, reconnect,
+    focusedDeviceId,
   } = useTerminalSessions(
     props.host,
     props.token,
@@ -1057,9 +1060,7 @@ export default function MainTerminalUi(props: MainTerminalUiProps) {
     }
   }, [props.activeDeviceId, props.openDevices, props.onSetActiveDevice]);
 
-  useEffect(() => {
-    if (props.activeDeviceId) focusDevice(props.activeDeviceId);
-  }, [focusDevice, props.activeDeviceId]);
+  // P0: Do not auto-focus terminal on activeDeviceId change. Require genuine user interaction.
 
   // ── Derived state for IDE shell ───────────────────────────────────────────
   const activeMetrics = metrics[props.activeDeviceId];
@@ -1090,146 +1091,317 @@ export default function MainTerminalUi(props: MainTerminalUiProps) {
   const errorSliceOffset = Math.max(0, activeErrors.length - 5);
   const visibleErrors = activeErrors.slice(-5);
 
-  // Improved topology layout: calculate generous spacing so interface labels never overlap
+  // P1 — Hierarchical topology layout with clear layer separation and parallel link offsets
   const layoutPositions = useMemo(() => {
     const count = props.topologyNodes.length;
     if (count === 0) return {};
 
-    let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
-    let allZero = true;
+    // Tier 0: External Connectors & Unmanaged Switches (Top / WAN)
+    // Tier 1: Core / Edge Routers (e.g. R1, R2)
+    // Tier 2: Distribution / Access Switches (e.g. SW1, SW2)
+    // Tier 3: Hosts / Endpoints / PCs / Servers (e.g. PC1, PC2, Server1, Server2)
+    const getNodeTier = (type: string | undefined, label: string | undefined): number => {
+      const t = (type || '').toLowerCase();
+      const l = (label || '').toLowerCase();
+      if (t.includes('external') || t.includes('unmanaged') || l.includes('ext') || l.includes('wan') || l.includes('cloud')) {
+        return 0;
+      }
+      if (t.includes('router') || t.includes('iosv') || t.includes('csr') || t.includes('cat8000') || t.includes('iosxr') || l.startsWith('r') || l.includes('router')) {
+        return 1;
+      }
+      if (t.includes('switch') || t.includes('iosvl2') || t.includes('nexus') || l.startsWith('sw') || l.includes('switch')) {
+        return 2;
+      }
+      if (t.includes('server') || t.includes('desktop') || t.includes('host') || t.includes('pc') || t.includes('ubuntu') || t.includes('alpine') || l.startsWith('pc') || l.startsWith('server')) {
+        return 3;
+      }
+      return 2;
+    };
 
-    for (const n of props.topologyNodes) {
-      const x = n.position?.x ?? 0;
-      const y = n.position?.y ?? 0;
-      if (x !== 0 || y !== 0) allZero = false;
-      if (x < minX) minX = x;
-      if (x > maxX) maxX = x;
-      if (y < minY) minY = y;
-      if (y > maxY) maxY = y;
-    }
+    const tiers: Record<number, TopologyNode[]> = { 0: [], 1: [], 2: [], 3: [] };
+    props.topologyNodes.forEach((node) => {
+      const nodeType = node?.data?.type || '';
+      const nodeLabel = node?.data?.label || node?.id || '';
+      const tier = getNodeTier(nodeType, nodeLabel);
+      tiers[tier].push(node);
+    });
+
+    // Sort nodes within each tier alphabetically by label for predictable schematic layout
+    Object.keys(tiers).forEach((k) => {
+      const tNum = Number(k);
+      tiers[tNum].sort((a, b) => (a?.data?.label || a?.id || '').localeCompare(b?.data?.label || b?.id || ''));
+    });
+
+    const tierY: Record<number, number> = {
+      0: 60,
+      1: 210,
+      2: 380,
+      3: 560,
+    };
 
     const posMap: Record<string, { x: number; y: number }> = {};
+    const pitch = 260; // 260px horizontal pitch gives ample space for interface labels
 
-    if (allZero || (maxX === minX && maxY === minY)) {
-      const radius = Math.max(160, count * 55);
-      const angleStep = (2 * Math.PI) / count;
-      props.topologyNodes.forEach((n, idx) => {
+    let maxNodesInTier = 1;
+    Object.values(tiers).forEach((list) => {
+      if (list.length > maxNodesInTier) maxNodesInTier = list.length;
+    });
+
+    const canvasCenterX = Math.max(480, (maxNodesInTier * pitch) / 2 + 80);
+
+    Object.entries(tiers).forEach(([tierStr, nodeList]) => {
+      const tier = Number(tierStr);
+      const y = tierY[tier];
+      const tierCount = nodeList.length;
+      if (tierCount === 0) return;
+
+      const totalTierWidth = (tierCount - 1) * pitch;
+      const startX = canvasCenterX - totalTierWidth / 2;
+
+      nodeList.forEach((n, idx) => {
         posMap[n.id] = {
-          x: Math.round(280 + radius * Math.cos(idx * angleStep)),
-          y: Math.round(220 + radius * Math.sin(idx * angleStep)),
+          x: Math.round(startX + idx * pitch),
+          y,
         };
       });
-      return posMap;
-    }
-
-    const spanX = maxX - minX;
-    const scale = spanX > 0 && spanX < count * 140 ? 1.7 : 1.25;
-
-    props.topologyNodes.forEach((n) => {
-      posMap[n.id] = {
-        x: Math.round((n.position.x - minX) * scale + 100),
-        y: Math.round((n.position.y - minY) * scale + 80),
-      };
     });
 
     return posMap;
   }, [props.topologyNodes]);
 
   // Topology ReactFlow nodes with real identifiable device icons and status dots
-  const nodes: Node[] = props.topologyNodes.map((node) => {
-    const label = node.data.label ?? node.id;
-    const isBooted = node.data.node_state === 'BOOTED';
-    const isOpen = openDeviceIds.has(node.id);
-    const pos = layoutPositions[node.id] || node.position;
+  const nodes: Node[] = useMemo(() => {
+    return props.topologyNodes.map((node) => {
+      const label = node?.data?.label ?? node?.id ?? '';
+      const isBooted = node?.data?.node_state === 'BOOTED';
+      const isOpen = openDeviceIds.has(node.id);
+      const pos = layoutPositions[node.id] || node?.position || { x: 0, y: 0 };
 
-    const rawType = (node.data.type || '').toUpperCase();
-    const displayType = rawType && rawType !== 'UNKNOWN' ? rawType : 'ROUTER';
+      const rawType = (node?.data?.type || '').toUpperCase();
+      const displayType = rawType && rawType !== 'UNKNOWN' ? rawType : 'ROUTER';
 
-    return {
-      id: node.id,
-      position: pos,
-      data: {
-        label: (
-          <div className="flex items-center gap-2.5 px-3 py-2 select-none">
-            {/* Separate boot status dot */}
-            <span
-              className={`h-2 w-2 rounded-full shrink-0 ${
-                isBooted ? 'bg-emerald-400 shadow-[0_0_6px_rgba(52,211,153,0.6)]' : 'bg-slate-500'
-              }`}
-              title={`Status: ${node.data.node_state ?? 'unknown'}`}
-            />
-            {/* Real identifiable device SVG icon */}
-            <span className="shrink-0 text-slate-300">
-              {getDeviceIcon(node.data.type, node.data.label, 16)}
-            </span>
-            {/* Node label and hardware type */}
-            <div className="flex flex-col text-left min-w-0">
-              <span className="text-xs font-bold text-slate-100 truncate tracking-wide">
-                {label}
+      return {
+        id: node.id,
+        position: pos,
+        data: {
+          label: (
+            <div className="flex items-center gap-2.5 px-3 py-2 select-none">
+              {/* Separate boot status dot */}
+              <span
+                className={`h-2 w-2 rounded-full shrink-0 ${
+                  isBooted ? 'bg-emerald-400 shadow-[0_0_6px_rgba(52,211,153,0.6)]' : 'bg-slate-500'
+                }`}
+                title={`Status: ${node?.data?.node_state ?? 'unknown'}`}
+              />
+              {/* Real identifiable device SVG icon */}
+              <span className="shrink-0 text-slate-300">
+                {getDeviceIcon(node?.data?.type, node?.data?.label, 16)}
               </span>
-              <span className="text-[9px] font-mono text-slate-400 uppercase tracking-wider">
-                {displayType}
-              </span>
+              {/* Node label and hardware type */}
+              <div className="flex flex-col text-left min-w-0">
+                <span className="text-xs font-bold text-slate-100 truncate tracking-wide">
+                  {label}
+                </span>
+                <span className="text-[9px] font-mono text-slate-400 uppercase tracking-wider">
+                  {displayType}
+                </span>
+              </div>
             </div>
-          </div>
-        ),
-      },
-      style: {
-        background: isOpen ? '#1e3a5f' : '#252526',
-        border: isOpen
-          ? '1.5px solid #007acc'
-          : isBooted
-          ? '1.5px solid #3c3c3c'
-          : '1.5px solid #2d2d2d',
-        borderRadius: 8,
-        padding: 0,
-        color: '#f1f5f9',
-        boxShadow: isOpen
-          ? '0 0 0 1px #007acc, 0 4px 12px rgba(0,0,0,0.5)'
-          : '0 2px 8px rgba(0,0,0,0.4)',
-        cursor: 'pointer',
-      },
-    };
-  });
+          ),
+        },
+        style: {
+          background: isOpen ? '#1e3a5f' : '#252526',
+          border: isOpen
+            ? '1.5px solid #007acc'
+            : isBooted
+            ? '1.5px solid #3c3c3c'
+            : '1.5px solid #2d2d2d',
+          borderRadius: 8,
+          padding: 0,
+          color: '#f1f5f9',
+          boxShadow: isOpen
+            ? '0 0 0 1px #007acc, 0 4px 12px rgba(0,0,0,0.5)'
+            : '0 2px 8px rgba(0,0,0,0.4)',
+          cursor: 'pointer',
+        },
+      };
+    });
+  }, [props.topologyNodes, layoutPositions, openDeviceIds]);
 
-  const edges: Edge[] = props.topologyLinks.map((link) => {
-    const linkInfo = cleanLinkLabel(link);
-    return {
-      id: link.id,
-      source: link.source,
-      target: link.target,
-      type: 'smoothstep',
-      markerEnd: { type: MarkerType.ArrowClosed, color: '#64748b', width: 14, height: 14 },
-      style: { stroke: '#475569', strokeWidth: 1.5 },
-      label: linkInfo.displayLabel || undefined,
-      labelBgStyle: linkInfo.displayLabel
-        ? { fill: '#18181b', fillOpacity: 0.95, rx: 5, ry: 5 }
-        : undefined,
-      labelBgPadding: [6, 3] as [number, number],
-      labelStyle: {
-        fill: '#94a3b8',
-        fontSize: 10,
-        fontWeight: 600,
-        fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace',
-      },
-      data: {
-        tooltip: linkInfo.fullTooltip,
-      },
-      animated: false,
-    };
-  });
+  const edges: Edge[] = useMemo(() => {
+    const pairCounts: Record<string, number> = {};
+    const pairIndices: Record<string, number> = {};
+
+    props.topologyLinks.forEach((link) => {
+      const key = [link.source, link.target].sort().join('::');
+      pairCounts[key] = (pairCounts[key] || 0) + 1;
+    });
+
+    return props.topologyLinks.map((link) => {
+      const linkInfo = cleanLinkLabel(link);
+      const pairKey = [link.source, link.target].sort().join('::');
+      const totalInPair = pairCounts[pairKey] || 1;
+      const idxInPair = pairIndices[pairKey] || 0;
+      pairIndices[pairKey] = idxInPair + 1;
+
+      // Apply distinct offset curve for parallel links
+      const curvatureOffset = totalInPair > 1 ? (idxInPair - (totalInPair - 1) / 2) * 22 : 0;
+      const borderRadius = Math.max(8, 16 + Math.abs(curvatureOffset));
+
+      return {
+        id: link.id,
+        source: link.source,
+        target: link.target,
+        type: 'smoothstep',
+        markerEnd: { type: MarkerType.ArrowClosed, color: '#64748b', width: 14, height: 14 },
+        style: {
+          stroke: totalInPair > 1 && idxInPair > 0 ? '#38bdf8' : '#475569',
+          strokeWidth: 1.5,
+        },
+        pathOptions: {
+          borderRadius,
+          offset: curvatureOffset,
+        },
+        label: linkInfo.displayLabel || undefined,
+        labelBgStyle: linkInfo.displayLabel
+          ? { fill: '#141416', fillOpacity: 0.98, rx: 6, ry: 6 }
+          : undefined,
+        labelBgPadding: [7, 3.5] as [number, number],
+        labelStyle: {
+          fill: '#cbd5e1',
+          fontSize: 10,
+          fontWeight: 600,
+          fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace',
+        },
+        data: {
+          tooltip: linkInfo.fullTooltip,
+        },
+        animated: false,
+      };
+    });
+  }, [props.topologyLinks]);
 
   const hasTopology = props.topologyNodes.length > 0 || props.topologyLinks.length > 0;
 
   // ── IDE-level UI state: show topology tab by default when no devices are open
   const [showTopologyTab, setShowTopologyTab] = useState(() => hasTopology && props.openDevices.length === 0);
   const [splitMode, setSplitMode] = useState<SplitMode>('single');
-  const [splitDeviceId, setSplitDeviceId] = useState<string>('');
   const [commandPaletteOpen, setCommandPaletteOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState<boolean>(() =>
     readPersistedFlag('cliq.sidebar.collapsed', false),
   );
+
+  // Stable pane assignments for multi-terminal layout:
+  // pane1: Left (Horizontal) or Upper (Vertical)
+  // pane2: Right (Horizontal) or Lower (Vertical)
+  const [paneAssignments, setPaneAssignments] = useState<{
+    pane1: string | null;
+    pane2: string | null;
+  }>({
+    pane1: null,
+    pane2: null,
+  });
+
+  const prevOpenDeviceIdsRef = useRef<Set<string>>(new Set());
+
+  // V.2.4: Deterministic Device Opening & Synchronization Rules
+  useEffect(() => {
+    const currentOpenIds = new Set(props.openDevices.map((d) => d.id));
+    const prevOpenIds = prevOpenDeviceIdsRef.current;
+    prevOpenDeviceIdsRef.current = currentOpenIds;
+
+    const newlyOpened = props.openDevices.filter((d) => !prevOpenIds.has(d.id));
+
+    setPaneAssignments((prev) => {
+      const openIds = props.openDevices.map((d) => d.id);
+      if (openIds.length === 0) {
+        return { pane1: null, pane2: null };
+      }
+
+      // Rule 1: Zero panes occupied
+      if (!prev.pane1 && !prev.pane2) {
+        const first = props.activeDeviceId && openIds.includes(props.activeDeviceId)
+          ? props.activeDeviceId
+          : openIds[0];
+        const second = openIds.find((id) => id !== first) ?? null;
+        return {
+          pane1: first,
+          pane2: splitMode !== 'single' && openIds.length >= 2 ? second : null,
+        };
+      }
+
+      let p1 = prev.pane1 && openIds.includes(prev.pane1) ? prev.pane1 : null;
+      let p2 = prev.pane2 && openIds.includes(prev.pane2) ? prev.pane2 : null;
+
+      // Handle newly opened device (e.g. PC1 clicked in Explorer)
+      if (newlyOpened.length > 0) {
+        const newest = newlyOpened[newlyOpened.length - 1].id;
+        if (splitMode === 'single' || openIds.length <= 1) {
+          p1 = newest;
+          p2 = null;
+        } else {
+          // Rule 2: When one pane occupied, fill empty pane
+          if (p1 && !p2) {
+            p2 = newest;
+          } else if (!p1 && p2) {
+            p1 = newest;
+          } else if (p1 && p2) {
+            // Rule 3: When both panes occupied, replace previously focused pane, preserve other pane!
+            if (focusedDeviceId === p2) {
+              p2 = newest;
+            } else {
+              p1 = newest;
+            }
+          }
+        }
+      } else {
+        // If a device closed, fill empty pane with remaining open device
+        if (!p1) {
+          p1 = openIds.find((id) => id !== p2) ?? openIds[0] ?? null;
+        }
+        if (splitMode !== 'single' && openIds.length >= 2) {
+          if (!p2 || p2 === p1) {
+            p2 = openIds.find((id) => id !== p1) ?? null;
+          }
+        } else {
+          p2 = null;
+        }
+      }
+
+      if (p1 === prev.pane1 && p2 === prev.pane2) {
+        return prev;
+      }
+      return { pane1: p1, pane2: p2 };
+    });
+  }, [props.openDevices, splitMode, focusedDeviceId, props.activeDeviceId]);
+
+  // Bring a device into view following deterministic UX rules:
+  const bringDeviceToPane = useCallback((deviceId: string) => {
+    if (!deviceId) return;
+
+    if (splitMode === 'single' || props.openDevices.length <= 1) {
+      setPaneAssignments({ pane1: deviceId, pane2: null });
+      focusDevice(deviceId);
+      return;
+    }
+
+    setPaneAssignments((prev) => {
+      // If already visible in Pane 1 or Pane 2: preserve layout, just focus
+      if (prev.pane1 === deviceId || prev.pane2 === deviceId) {
+        return prev;
+      }
+
+      // If not visible in either pane: replace focused pane, preserve other pane!
+      if (focusedDeviceId === prev.pane2) {
+        return { pane1: prev.pane1, pane2: deviceId };
+      } else {
+        return { pane1: deviceId, pane2: prev.pane2 };
+      }
+    });
+
+    focusDevice(deviceId);
+  }, [splitMode, props.openDevices.length, focusedDeviceId, focusDevice]);
 
   // Global Ctrl+P / Ctrl+K keyboard shortcut for Command Palette
   useEffect(() => {
@@ -1251,15 +1423,58 @@ export default function MainTerminalUi(props: MainTerminalUiProps) {
 
   const handleSetSplitMode = (mode: SplitMode) => {
     setSplitMode(mode);
+    if (mode !== 'single' && props.openDevices.length >= 2) {
+      setPaneAssignments((prev) => {
+        const openIds = props.openDevices.map((d) => d.id);
+        const p1 = prev.pane1 && openIds.includes(prev.pane1)
+          ? prev.pane1
+          : (focusedDeviceId && openIds.includes(focusedDeviceId)
+            ? focusedDeviceId
+            : (props.activeDeviceId && openIds.includes(props.activeDeviceId) ? props.activeDeviceId : openIds[0]));
+        const p2 = prev.pane2 && openIds.includes(prev.pane2) && prev.pane2 !== p1
+          ? prev.pane2
+          : openIds.find((id) => id !== p1) ?? null;
+        return { pane1: p1, pane2: p2 };
+      });
+    }
     window.setTimeout(() => refitAll(), 150);
   };
 
-  const otherDevices = props.openDevices.filter((d) => d.id !== props.activeDeviceId);
-  const effectiveSplitDeviceId = (
-    otherDevices.some((d) => d.id === splitDeviceId)
-      ? splitDeviceId
-      : otherDevices[0]?.id
-  ) ?? '';
+  const handleSelectPane1Device = (deviceId: string) => {
+    setPaneAssignments((prev) => ({
+      pane1: deviceId,
+      pane2: prev.pane2 === deviceId ? prev.pane1 : prev.pane2,
+    }));
+    focusDevice(deviceId);
+  };
+
+  const handleSelectPane2Device = (deviceId: string) => {
+    setPaneAssignments((prev) => ({
+      pane2: deviceId,
+      pane1: prev.pane1 === deviceId ? prev.pane2 : prev.pane1,
+    }));
+    focusDevice(deviceId);
+  };
+
+  // Keyboard navigation between split panes (Alt+1/Left/Up -> Pane 1, Alt+2/Right/Down -> Pane 2)
+  useEffect(() => {
+    const handlePaneKey = (e: KeyboardEvent) => {
+      if (splitMode === 'single' || props.openDevices.length < 2) return;
+      if (e.altKey && (e.key === '1' || e.key === 'ArrowLeft' || e.key === 'ArrowUp')) {
+        if (paneAssignments.pane1) {
+          e.preventDefault();
+          focusDevice(paneAssignments.pane1);
+        }
+      } else if (e.altKey && (e.key === '2' || e.key === 'ArrowRight' || e.key === 'ArrowDown')) {
+        if (paneAssignments.pane2) {
+          e.preventDefault();
+          focusDevice(paneAssignments.pane2);
+        }
+      }
+    };
+    window.addEventListener('keydown', handlePaneKey);
+    return () => window.removeEventListener('keydown', handlePaneKey);
+  }, [splitMode, props.openDevices.length, paneAssignments.pane1, paneAssignments.pane2, focusDevice]);
 
   return (
     <div className="flex h-screen flex-col overflow-hidden" style={{ background: 'var(--ide-bg)', color: 'var(--ide-text)' }}>
@@ -1271,6 +1486,13 @@ export default function MainTerminalUi(props: MainTerminalUiProps) {
         userName={props.userName}
         intelCount={activeIntelItems.length}
         intelPanelOpen={intelPanelOpen}
+        copilotOpen={copilotOpen}
+        onToggleCopilot={() => {
+          setCopilotOpen((v) => {
+            setTimeout(() => refitAll(), 60);
+            return !v;
+          });
+        }}
         splitMode={splitMode}
         openDeviceCount={props.openDevices.length}
         onToggleIntel={() => setIntelPanelOpen((v) => !v)}
@@ -1298,7 +1520,11 @@ export default function MainTerminalUi(props: MainTerminalUiProps) {
           collapsed={sidebarCollapsed}
           onSelectLab={props.onSelectLab}
           onToggleCollapse={() => setSidebarCollapsed((v) => !v)}
-          onOpenDevice={(id) => { setShowTopologyTab(false); props.onOpenDevice(id); }}
+          onOpenDevice={(id) => {
+            setShowTopologyTab(false);
+            props.onOpenDevice(id);
+            bringDeviceToPane(id);
+          }}
           onCloseDevice={props.onCloseDevice}
           onShowTopology={() => setShowTopologyTab(true)}
         />
@@ -1310,10 +1536,15 @@ export default function MainTerminalUi(props: MainTerminalUiProps) {
           <WorkspaceTabs
             openDevices={props.openDevices}
             activeDeviceId={props.activeDeviceId}
+            focusedDeviceId={focusedDeviceId}
             metrics={metrics}
             hasTopology={hasTopology}
             topologyActive={showTopologyTab}
-            onSetActive={(id) => { setShowTopologyTab(false); props.onSetActiveDevice(id); }}
+            onSetActive={(id) => {
+              setShowTopologyTab(false);
+              props.onSetActiveDevice(id);
+              bringDeviceToPane(id);
+            }}
             onClose={props.onCloseDevice ?? (() => {})}
             onCloseTopology={() => setShowTopologyTab(false)}
             onShowTopology={() => setShowTopologyTab(true)}
@@ -1339,31 +1570,79 @@ export default function MainTerminalUi(props: MainTerminalUiProps) {
                 {/* Visual split headers when split mode is active with >= 2 devices */}
                 {splitMode === 'horizontal' && props.openDevices.length >= 2 && (
                   <div className="absolute top-0 left-0 right-0 h-7 flex border-b z-10" style={{ background: 'var(--ide-sidebar-bg)', borderColor: 'var(--ide-border)' }}>
+                    {/* Pane 1 Header (Left) */}
                     <div className="w-1/2 flex items-center justify-between px-3 text-xs border-r" style={{ borderColor: 'var(--ide-border)' }}>
-                      <span className="font-semibold text-sky-400 truncate">
-                        {props.openDevices.find((d) => d.id === props.activeDeviceId)?.label}
-                        <span className="ml-1.5 text-[9px] font-normal text-slate-400">(Focused)</span>
-                      </span>
-                      <span className="flex items-center text-[10px] text-emerald-400"><span className="mr-1.5 inline-block h-1.5 w-1.5 rounded-full bg-emerald-400" />Active</span>
-                    </div>
-                    <div className="w-1/2 flex items-center justify-between px-3 text-xs">
-                      <div className="flex items-center gap-1.5">
-                        <span className="text-[10px] text-slate-400">Split Pane:</span>
+                      <div className="flex items-center gap-1.5 min-w-0">
+                        <span className="text-[10px] uppercase font-bold text-slate-400 shrink-0">Pane 1:</span>
                         <select
-                          value={effectiveSplitDeviceId}
-                          onChange={(e) => setSplitDeviceId(e.target.value)}
-                          className="bg-transparent text-xs font-semibold text-slate-200 outline-none cursor-pointer"
+                          value={paneAssignments.pane1 ?? ''}
+                          onChange={(e) => handleSelectPane1Device(e.target.value)}
+                          className="bg-transparent text-xs font-semibold text-sky-400 outline-none cursor-pointer truncate max-w-[120px]"
+                          title="Change device assigned to Pane 1"
                         >
-                          {otherDevices.map((d) => (
+                          {props.openDevices.map((d) => (
                             <option key={d.id} value={d.id} className="bg-[#252526] text-white">
                               {d.label}
                             </option>
                           ))}
                         </select>
+                        {focusedDeviceId === paneAssignments.pane1 ? (
+                          <span className="ml-1 px-1.5 py-0.2 rounded text-[9px] font-semibold bg-sky-500/20 text-sky-400 border border-sky-500/40 shrink-0">
+                            Focused
+                          </span>
+                        ) : (
+                          <button
+                            type="button"
+                            onClick={() => paneAssignments.pane1 && focusDevice(paneAssignments.pane1)}
+                            className="ml-1 px-1.5 py-0.2 rounded text-[9px] text-slate-400 hover:text-sky-300 hover:bg-slate-800 transition border border-slate-700/50 shrink-0"
+                            title="Focus Pane 1 (Alt+1)"
+                          >
+                            Click to Focus
+                          </button>
+                        )}
+                      </div>
+                      <span className="flex items-center text-[10px] text-emerald-400 shrink-0">
+                        <span className="mr-1.5 inline-block h-1.5 w-1.5 rounded-full bg-emerald-400" />
+                        Active
+                      </span>
+                    </div>
+
+                    {/* Pane 2 Header (Right) */}
+                    <div className="w-1/2 flex items-center justify-between px-3 text-xs">
+                      <div className="flex items-center gap-1.5 min-w-0">
+                        <span className="text-[10px] uppercase font-bold text-slate-400 shrink-0">Pane 2:</span>
+                        <select
+                          value={paneAssignments.pane2 ?? ''}
+                          onChange={(e) => handleSelectPane2Device(e.target.value)}
+                          className="bg-transparent text-xs font-semibold text-slate-200 outline-none cursor-pointer truncate max-w-[120px]"
+                          title="Change device assigned to Pane 2"
+                        >
+                          {props.openDevices.map((d) => (
+                            <option key={d.id} value={d.id} className="bg-[#252526] text-white">
+                              {d.label}
+                            </option>
+                          ))}
+                        </select>
+                        {focusedDeviceId === paneAssignments.pane2 ? (
+                          <span className="ml-1 px-1.5 py-0.2 rounded text-[9px] font-semibold bg-sky-500/20 text-sky-400 border border-sky-500/40 shrink-0">
+                            Focused
+                          </span>
+                        ) : (
+                          <button
+                            type="button"
+                            onClick={() => paneAssignments.pane2 && focusDevice(paneAssignments.pane2)}
+                            className="ml-1 px-1.5 py-0.2 rounded text-[9px] text-slate-400 hover:text-sky-300 hover:bg-slate-800 transition border border-slate-700/50 shrink-0"
+                            title="Focus Pane 2 (Alt+2)"
+                          >
+                            Click to Focus
+                          </button>
+                        )}
                       </div>
                       <button
-                        onClick={() => props.onSetActiveDevice(effectiveSplitDeviceId)}
-                        className="text-[10px] text-sky-400 hover:text-sky-300 transition-colors"
+                        type="button"
+                        onClick={() => paneAssignments.pane2 && focusDevice(paneAssignments.pane2)}
+                        className="text-[10px] text-sky-400 hover:text-sky-300 transition-colors shrink-0"
+                        title="Focus Pane 2 (Alt+2)"
                       >
                         Focus Pane 2 ↘
                       </button>
@@ -1373,47 +1652,90 @@ export default function MainTerminalUi(props: MainTerminalUiProps) {
 
                 {splitMode === 'vertical' && props.openDevices.length >= 2 && (
                   <div className="absolute top-0 left-0 right-0 h-7 flex items-center justify-between px-3 text-xs border-b z-10" style={{ background: 'var(--ide-sidebar-bg)', borderColor: 'var(--ide-border)' }}>
-                    <span className="font-semibold text-sky-400">
-                      {props.openDevices.find((d) => d.id === props.activeDeviceId)?.label} (Upper Pane)
-                    </span>
                     <div className="flex items-center gap-2">
-                      <span className="text-[10px] text-slate-400">Lower:</span>
+                      <span className="text-[10px] uppercase font-bold text-slate-400">Upper:</span>
                       <select
-                        value={effectiveSplitDeviceId}
-                        onChange={(e) => setSplitDeviceId(e.target.value)}
-                        className="bg-transparent text-xs font-semibold text-slate-200 outline-none cursor-pointer"
+                        value={paneAssignments.pane1 ?? ''}
+                        onChange={(e) => handleSelectPane1Device(e.target.value)}
+                        className="bg-transparent text-xs font-semibold text-sky-400 outline-none cursor-pointer"
                       >
-                        {otherDevices.map((d) => (
+                        {props.openDevices.map((d) => (
                           <option key={d.id} value={d.id} className="bg-[#252526] text-white">
                             {d.label}
                           </option>
                         ))}
                       </select>
+                      {focusedDeviceId === paneAssignments.pane1 ? (
+                        <span className="ml-1 px-1.5 py-0.2 rounded text-[9px] font-semibold bg-sky-500/20 text-sky-400 border border-sky-500/40">
+                          Focused
+                        </span>
+                      ) : (
+                        <button
+                          type="button"
+                          onClick={() => paneAssignments.pane1 && focusDevice(paneAssignments.pane1)}
+                          className="ml-1 px-1.5 py-0.2 rounded text-[9px] text-slate-400 hover:text-sky-300 hover:bg-slate-800 transition border border-slate-700/50"
+                        >
+                          Click to Focus
+                        </button>
+                      )}
+                    </div>
+
+                    <div className="flex items-center gap-2">
+                      <span className="text-[10px] uppercase font-bold text-slate-400">Lower:</span>
+                      <select
+                        value={paneAssignments.pane2 ?? ''}
+                        onChange={(e) => handleSelectPane2Device(e.target.value)}
+                        className="bg-transparent text-xs font-semibold text-slate-200 outline-none cursor-pointer"
+                      >
+                        {props.openDevices.map((d) => (
+                          <option key={d.id} value={d.id} className="bg-[#252526] text-white">
+                            {d.label}
+                          </option>
+                        ))}
+                      </select>
+                      {focusedDeviceId === paneAssignments.pane2 ? (
+                        <span className="ml-1 px-1.5 py-0.2 rounded text-[9px] font-semibold bg-sky-500/20 text-sky-400 border border-sky-500/40">
+                          Focused
+                        </span>
+                      ) : (
+                        <button
+                          type="button"
+                          onClick={() => paneAssignments.pane2 && focusDevice(paneAssignments.pane2)}
+                          className="ml-1 px-1.5 py-0.2 rounded text-[9px] text-slate-400 hover:text-sky-300 hover:bg-slate-800 transition border border-slate-700/50"
+                        >
+                          Click to Focus
+                        </button>
+                      )}
                     </div>
                   </div>
                 )}
 
                 {/* Terminal mounts positioned per layout mode */}
                 {props.openDevices.map((device) => {
-                  const isPrimary = device.id === props.activeDeviceId;
-                  const isSecondary = device.id === effectiveSplitDeviceId;
+                  const isPane1 = device.id === paneAssignments.pane1;
+                  const isPane2 = device.id === paneAssignments.pane2;
 
                   let placementClass = 'hidden';
                   let inlineStyle: React.CSSProperties | undefined = undefined;
 
                   if (splitMode === 'single' || props.openDevices.length < 2) {
-                    placementClass = isPrimary ? 'absolute inset-0 block' : 'hidden';
+                    const singleActiveId = focusedDeviceId && openDeviceIds.has(focusedDeviceId)
+                      ? focusedDeviceId
+                      : (props.activeDeviceId && openDeviceIds.has(props.activeDeviceId)
+                        ? props.activeDeviceId
+                        : paneAssignments.pane1 || props.openDevices[0]?.id);
+                    placementClass = (device.id === singleActiveId) ? 'absolute inset-0 block' : 'hidden';
                   } else if (splitMode === 'horizontal') {
-                    if (isPrimary) {
+                    if (isPane1) {
                       placementClass = 'absolute top-7 bottom-0 left-0 w-1/2 block border-r border-[#3c3c3c]';
-                    } else if (isSecondary) {
+                    } else if (isPane2) {
                       placementClass = 'absolute top-7 bottom-0 right-0 w-1/2 block';
                     }
                   } else if (splitMode === 'vertical') {
-                    if (isPrimary) {
+                    if (isPane1) {
                       placementClass = 'absolute top-7 left-0 right-0 block border-b border-[#3c3c3c]';
                       inlineStyle = { height: 'calc(50% - 14px)' };
-                    } else if (isSecondary) {
+                    } else if (isPane2) {
                       placementClass = 'absolute bottom-0 left-0 right-0 block';
                       inlineStyle = { height: 'calc(50% - 14px)' };
                     }
@@ -1424,11 +1746,10 @@ export default function MainTerminalUi(props: MainTerminalUiProps) {
                       key={device.id}
                       className={placementClass}
                       style={inlineStyle}
-                      onClick={() => {
-                        if (device.id !== props.activeDeviceId) {
-                          props.onSetActiveDevice(device.id);
-                        }
-                      }}
+                      onPointerDownCapture={() => focusDevice(device.id)}
+                      onMouseDownCapture={() => focusDevice(device.id)}
+                      onFocusCapture={() => focusDevice(device.id)}
+                      onClick={() => focusDevice(device.id)}
                       ref={(el) => registerMount(device.id, el)}
                     />
                   );
@@ -1585,131 +1906,28 @@ export default function MainTerminalUi(props: MainTerminalUiProps) {
           )}
         </div>
 
-        {/* ── CLIQ Advisory panel (right drawer) ─────────────────────────── */}
-        <aside
-          className={`flex shrink-0 flex-col overflow-hidden border-l transition-[width] duration-200 ease-in-out ${
-            intelPanelOpen ? 'w-80' : 'w-0 border-l-0'
-          }`}
-          style={{ borderColor: 'var(--ide-border)', background: 'var(--ide-panel-bg)' }}
-          aria-hidden={!intelPanelOpen}
-        >
-          <div className="flex h-full w-80 flex-col">
-            {/* Panel header */}
-            <div
-              className="flex shrink-0 items-center justify-between border-b px-3 py-2"
-              style={{ borderColor: 'var(--ide-border)', background: '#2d2d2d' }}
-            >
-              <div className="flex items-center gap-2">
-                <span className="flex items-center gap-1.5 text-[10px] font-bold tracking-widest" style={{ color: '#a78bfa' }}><AdvisoryIcon size={12} /> CLIQ ADVISORY</span>
-                <span
-                  className="rounded-full px-1.5 py-0.5 text-[9px]"
-                  style={{ background: 'var(--ide-hover)', color: 'var(--ide-text-muted)' }}
-                >
-                  advisory only · never executes
-                </span>
-              </div>
-              <div className="flex items-center gap-1">
-                {props.activeDeviceId && (
-                  <button
-                    onClick={() => recallMemory(props.activeDeviceId, 'recent issues')}
-                    className="rounded px-1.5 py-0.5 text-[10px] transition-colors"
-                    style={{ color: 'var(--ide-text-muted)' }}
-                    title="Recall past resolutions from memory"
-                  >
-                    Recall
-                  </button>
-                )}
-                {activeIntelItems.length > 0 && (
-                  <button
-                    onClick={() => { activeIntelItems.forEach((item) => dismissIntelItem(props.activeDeviceId, item.id)); }}
-                    className="rounded px-1.5 py-0.5 text-[10px] transition-colors"
-                    style={{ color: 'var(--ide-text-muted)' }}
-                    title="Clear all advisory items"
-                  >
-                    Clear
-                  </button>
-                )}
-              </div>
-            </div>
-
-            {/* Feature 2 — sticky protocol context chip */}
-            {activeCtx && (
-              <div
-                className="flex shrink-0 items-center gap-1.5 border-b px-3 py-1.5"
-                style={{ borderColor: 'var(--ide-border)', background: 'rgba(45,45,45,0.2)' }}
-              >
-                <span className="text-[9px] font-semibold uppercase tracking-wide" style={{ color: 'var(--ide-text-muted)' }}>Context</span>
-                <span
-                  className="flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide"
-                  style={{ background: 'rgba(124,58,237,0.25)', color: '#c4b5fd', border: '1px solid rgba(124,58,237,0.4)' }}
-                  title={`Suggestions biased toward ${activeCtx.protocol.toUpperCase()}`}
-                >
-                  {activeCtx.protocol.toUpperCase()}
-                </span>
-                <button
-                  onClick={() => clearContext(props.activeDeviceId)}
-                  className="ml-auto rounded px-1.5 py-0.5 text-[10px] transition-colors"
-                  style={{ color: 'var(--ide-text-muted)' }}
-                  title="Clear the protocol context"
-                >
-                  Clear ✕
-                </button>
-              </div>
-            )}
-
-            {/* Panel body (scrollable list of advisory cards) */}
-            <div className="min-h-0 flex-1 space-y-2 overflow-y-auto p-2">
-              {activeIntelItems.length === 0 && (
-                <div className="flex flex-col items-center justify-center gap-2 pt-10 text-center">
-                  <AdvisoryIcon size={28} className="text-violet-400 opacity-40" />
-                  <p className="text-xs font-medium" style={{ color: 'var(--ide-text-muted)' }}>Ask CLIQ anything</p>
-                  <p className="text-[11px] leading-relaxed" style={{ color: 'var(--ide-text-dim)' }}>
-                    Use the box above, or type{' '}
-                    <kbd className="rounded px-1 text-[10px]" style={{ background: 'var(--ide-border)', color: 'var(--ide-text-muted)' }}>?</kbd>{' '}
-                    then your question in the terminal.<br />
-                    Answers are advisory — CLIQ never runs them for you.
-                  </p>
-                </div>
-              )}
-
-              {activeIntelItems.map((item) => (
-                <IntelPanelCard
-                  key={item.id}
-                  item={item}
-                  deviceId={props.activeDeviceId}
-                  onDismiss={() => dismissIntelItem(props.activeDeviceId, item.id)}
-                  onMarkResolved={(issueText, commands, platform) =>
-                    markResolved(props.activeDeviceId, issueText, commands, platform)
-                  }
-                  onInsert={(command) => insertToTerminal(props.activeDeviceId, command)}
-                  onInsertBlock={(commands) => insertBlock(props.activeDeviceId, commands)}
-                  onExplain={(command) => explain(props.activeDeviceId, command)}
-                />
-              ))}
-            </div>
-
-            {/* Ask CLIQ input pinned to bottom */}
-            <div
-              className="shrink-0 border-t px-3 py-2"
-              style={{ borderColor: 'var(--ide-border)', background: 'rgba(45,45,45,0.4)' }}
-            >
-              <AskBox
-                disabled={!props.activeDeviceId}
-                onAsk={(q) => ask(props.activeDeviceId, q)}
-              />
-            </div>
-
-            {/* Panel footer */}
-            <div
-              className="shrink-0 border-t px-3 py-1.5"
-              style={{ borderColor: 'var(--ide-border)', background: 'rgba(45,45,45,0.5)' }}
-            >
-              <p className="text-[10px]" style={{ color: 'var(--ide-text-dim)' }}>
-                CLIQ never executes commands · engineer controls the device
-              </p>
-            </div>
-          </div>
-        </aside>
+        {/* ── CLIQ AI Copilot panel (unified right drawer) ─────────── */}
+        <CopilotPanel
+          isOpen={copilotOpen}
+          onClose={() => {
+            setCopilotOpen(false);
+            setTimeout(() => refitAll(), 60);
+          }}
+          devices={props.allDevices}
+          openDevices={props.openDevices}
+          activeDeviceId={props.activeDeviceId}
+          focusedDeviceId={focusedDeviceId}
+          deviceMetrics={metrics}
+          token={props.token}
+          onInsertCommand={(deviceId, command) => {
+            if (deviceId && deviceId !== props.activeDeviceId) {
+              props.onSetActiveDevice(deviceId);
+            }
+            insertToTerminal(deviceId, command);
+          }}
+          onExplainCommand={(deviceId, command) => explain(deviceId, command)}
+          onRefitTerminals={refitAll}
+        />
       </div>
 
       {/* ── Status bar (bottom chrome) ──────────────────────────────────── */}

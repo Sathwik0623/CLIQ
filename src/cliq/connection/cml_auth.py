@@ -294,6 +294,8 @@ class CMLAuthManager:
         if cached and not self._is_expired(cached):
             self.token = cached["token"]
             self.token_expiry = cached["expiry"]
+            if hasattr(self._session, "headers") and hasattr(self._session.headers, "update"):
+                    self._session.headers.update({"Authorization": f"Bearer {self.token}"})
             if self._validate_cached_token_live():
                 log.info(f"Using validated cached token for {self.host}")
                 return True
@@ -357,10 +359,10 @@ class CMLAuthManager:
         except Exception:
             lab_title = lab_id
 
-        # Non-IOS node types to skip (no IOS console)
+        # Non-console node types to skip
         _SKIP_TYPES = {
             "external_connector", "unmanaged_switch", "bridge",
-            "wan_emulator", "desktop", "server",
+            "wan_emulator",
         }
 
         nodes_resp = self._get(f"/labs/{lab_id}/nodes")
@@ -500,10 +502,37 @@ class CMLAuthManager:
                     raw_label = str(lk.get("label") or "")
                     is_raw_uuid = raw_label == lid or _is_uuid(raw_label)
 
-                    if not is_raw_uuid and raw_label:
-                        link_label = raw_label
-                    elif clean_src and clean_tgt:
+                    node_a_id = lk.get("node_a") or lk.get("n1") or ""
+                    node_b_id = lk.get("node_b") or lk.get("n2") or ""
+                    node_map = {n["id"]: n.get("label", "") for n in nodes_out}
+                    node_a_lbl = node_map.get(node_a_id, "")
+                    node_b_lbl = node_map.get(node_b_id, "")
+
+                    intf_a = clean_src
+                    intf_b = clean_tgt
+
+                    # Extract exact interfaces from link label if not provided by CML API
+                    if (not intf_a or not intf_b) and "<->" in raw_label:
+                        part_a, part_b = raw_label.split("<->", 1)
+                        part_a, part_b = part_a.strip(), part_b.strip()
+                        if not intf_a:
+                            if node_a_lbl and part_a.startswith(node_a_lbl + "-"):
+                                intf_a = part_a[len(node_a_lbl) + 1:]
+                            elif "-" in part_a:
+                                intf_a = part_a.split("-", 1)[1]
+                        if not intf_b:
+                            if node_b_lbl and part_b.startswith(node_b_lbl + "-"):
+                                intf_b = part_b[len(node_b_lbl) + 1:]
+                            elif "-" in part_b:
+                                intf_b = part_b.split("-", 1)[1]
+
+                    clean_src = intf_a
+                    clean_tgt = intf_b
+
+                    if clean_src and clean_tgt:
                         link_label = f"{clean_src} <-> {clean_tgt}"
+                    elif not is_raw_uuid and raw_label:
+                        link_label = raw_label
                     elif clean_src:
                         link_label = clean_src
                     elif clean_tgt:
@@ -514,8 +543,8 @@ class CMLAuthManager:
                     links_out.append({
                         "id":     lid,
                         "label":  link_label,
-                        "node_a": lk.get("node_a") or lk.get("n1") or "",
-                        "node_b": lk.get("node_b") or lk.get("n2") or "",
+                        "node_a": node_a_id,
+                        "node_b": node_b_id,
                         "node_a_intf": clean_src,
                         "node_b_intf": clean_tgt,
                         "raw": lk,
@@ -532,33 +561,73 @@ class CMLAuthManager:
     # ─────────────────────────────────────────────────────────────
 
     def _authenticate(self, username: str, password: str) -> bool:
-        try:
-            r = self._session.post(
-                f"{self.base}/auth_extended",
-                json={"username": username, "password": password},
-                timeout=15
-            )
-            r.raise_for_status()
-            data = r.json()
-            # CML returns JWT in 'token', UUID in 'id'
-            self.token = data.get("token") or data.get("id", "")
-            if not self.token:
-                raise ValueError("No token in auth response")
-            # CML tokens last 24 hours
-            self.token_expiry = time.time() + (23 * 3600)
-            self._save_token_cache(self.host, self.token, self.token_expiry)
-            log.info(f"Authenticated to {self.host} as {username}")
-            return True
-        except Exception as e:
-            # FAIL CLOSED. Do NOT swallow the failure into a False return — a
-            # silent False previously let the web gate reply 200 OK on an auth
-            # failure. Clear any half-set token and re-raise the real cause
-            # (HTTP 401/403, DNS/NameResolution, connection error) so the caller
-            # can map it to the correct non-2xx status and message.
-            log.error(f"Auth failed to {self.host}: {e}")
-            self.token = None
-            self.token_expiry = 0
-            raise
+        """Authenticate to CML using POST /api/v0/authenticate (per CML REST API).
+
+        Sends a JSON payload {"username": "<user>", "password": "<pass>"} with
+        Content-Type: application/json. Parses the returned JWT token whether it
+        arrives as a direct JSON string, JSON object, or plain string.
+        Falls back to /api/v0/auth_extended if /api/v0/authenticate returns 404.
+        """
+        headers = {
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+        }
+        payload = {"username": username, "password": password}
+
+        endpoints = [
+            f"{self.base}/authenticate",
+            f"{self.base}/auth_extended",
+        ]
+
+        last_exc: Optional[Exception] = None
+        for endpoint in endpoints:
+            try:
+                r = self._session.post(
+                    endpoint,
+                    json=payload,
+                    headers=headers,
+                    timeout=15,
+                )
+                if r.status_code == 404 and endpoint != endpoints[-1]:
+                    continue
+
+                r.raise_for_status()
+
+                raw_token = ""
+                try:
+                    data = r.json()
+                    if isinstance(data, str):
+                        raw_token = data.strip().strip('"')
+                    elif isinstance(data, dict):
+                        raw_token = data.get("token") or data.get("id") or ""
+                except Exception:
+                    raw_token = r.text.strip().strip('"')
+
+                if not raw_token:
+                    raise ValueError(f"No token in auth response from {endpoint}")
+
+                self.token = raw_token
+                self.token_expiry = time.time() + (23 * 3600)
+                self._save_token_cache(self.host, self.token, self.token_expiry)
+                if hasattr(self._session, "headers") and hasattr(self._session.headers, "update"):
+                    self._session.headers.update({"Authorization": f"Bearer {self.token}"})
+                log.info(f"Authenticated to {self.host} as {username}")
+                return True
+            except Exception as e:
+                last_exc = e
+                status_code = getattr(getattr(e, "response", None), "status_code", None)
+                if status_code in (401, 403):
+                    break
+                if status_code == 404 and endpoint != endpoints[-1]:
+                    continue
+                break
+
+        log.error(f"Auth failed to {self.host}: {last_exc}")
+        self.token = None
+        self.token_expiry = 0
+        if last_exc:
+            raise last_exc
+        raise RuntimeError("Authentication failed: No valid response from controller")
 
     def _validate_cached_token_live(self) -> bool:
         """Revalidate the in-memory cached token against live CONTROLLER state.
@@ -694,6 +763,16 @@ class CMLAuthManager:
         self.token_expiry = 0
         if target:
             self._invalidate_cached_token(target)
+
+    def get_system_information(self) -> dict:
+        """Query /api/v0/system_information to check controller version and readiness."""
+        try:
+            r = self._session.get(f"{self.base}/system_information", timeout=5)
+            if r.ok:
+                return r.json()
+        except Exception:
+            pass
+        return {}
 
     def _get(self, path: str) -> requests.Response:
         """Authenticated GET request."""

@@ -64,6 +64,7 @@ from cliq.utils import observability as obs
 
 #: Pinned controller version CLIQ targets (matches NetSim CML 2.9.0).
 REQUIRED_CONTROLLER_VERSION = "2.9.0"
+SUPPORTED_CONTROLLER_VERSIONS = ("2.9", "2.8", "2.7", "2.")
 
 #: NetSim portal guidance shown whenever a reservation looks expired/invalid.
 NETSIM_PORTAL_HINT = (
@@ -495,8 +496,8 @@ class CMLClient:
             ) from exc
         st.mark("version_check", "success", detail=self._controller_version or "")
 
-        if self._controller_version and not self._controller_version.startswith(
-            REQUIRED_CONTROLLER_VERSION
+        if self._controller_version and not any(
+            self._controller_version.startswith(v) for v in SUPPORTED_CONTROLLER_VERSIONS
         ):
             elapsed = (time.monotonic() - start) * 1000
             _log_connection_event(

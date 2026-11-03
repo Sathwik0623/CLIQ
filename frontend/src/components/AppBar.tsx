@@ -24,6 +24,7 @@ import {
   CloseIcon,
   AlertTriangleIcon,
 } from './Icons';
+import { SparklesIcon } from './copilot/CopilotIcons';
 
 export type SplitMode = 'single' | 'horizontal' | 'vertical';
 
@@ -32,12 +33,14 @@ type AppBarProps = {
   labExpiresAt?: string | null;
   userName?: string;
   intelCount?: number;
-  intelPanelOpen: boolean;
+  intelPanelOpen?: boolean;
+  copilotOpen?: boolean;
+  onToggleCopilot?: () => void;
   hasTopology?: boolean;
   topologyActive?: boolean;
   splitMode: SplitMode;
   openDeviceCount: number;
-  onToggleIntel: () => void;
+  onToggleIntel?: () => void;
   onToggleTopology?: () => void;
   onSetSplitMode?: (mode: SplitMode) => void;
   onOpenCommandPalette?: () => void;
@@ -52,6 +55,8 @@ export default function AppBar({
   userName,
   intelCount = 0,
   intelPanelOpen,
+  copilotOpen = false,
+  onToggleCopilot,
   hasTopology = false,
   topologyActive = false,
   splitMode,
@@ -179,28 +184,24 @@ export default function AppBar({
           </div>
         )}
 
-        {/* CLIQ Advisory toggle */}
-        <button
-          onClick={onToggleIntel}
-          className="flex items-center gap-1.5 rounded px-2.5 py-1 text-xs font-semibold transition-colors cursor-pointer"
-          style={{
-            background: intelPanelOpen ? 'var(--ide-accent)' : 'var(--ide-hover)',
-            color: intelPanelOpen ? '#ffffff' : 'var(--ide-text-muted)',
-            border: intelPanelOpen ? '1px solid var(--ide-accent)' : '1px solid var(--ide-border)',
-          }}
-          title={intelPanelOpen ? 'Hide CLIQ Advisory drawer' : 'Open CLIQ Advisory drawer'}
-        >
-          <AdvisoryIcon size={13} className="shrink-0" />
-          <span>Advisory</span>
-          {intelCount > 0 && (
-            <span
-              className="rounded-full px-1.5 py-0.2 text-[10px] font-bold text-white shrink-0"
-              style={{ background: '#7c3aed' }}
-            >
-              {intelCount}
-            </span>
-          )}
-        </button>
+
+
+                {/* CLIQ Copilot toggle */}
+        {onToggleCopilot && (
+          <button
+            onClick={onToggleCopilot}
+            className="flex items-center gap-1.5 rounded px-2.5 py-1 text-xs font-semibold transition-colors cursor-pointer"
+            style={{
+              background: copilotOpen ? '#0891b2' : 'var(--ide-hover)',
+              color: copilotOpen ? '#ffffff' : 'var(--ide-text-muted)',
+              border: copilotOpen ? '1px solid #06b6d4' : '1px solid var(--ide-border)',
+            }}
+            title={copilotOpen ? 'Hide CLIQ Copilot' : 'Open CLIQ Copilot (Meta Llama 3.3)'}
+          >
+            <SparklesIcon size={13} className="shrink-0 text-cyan-300" />
+            <span>Copilot</span>
+          </button>
+        )}
 
         {/* Settings button */}
         {onOpenSettings && (

@@ -64,15 +64,20 @@ class InteractiveAuthRequired(ConnectionError):
         self.stage = stage
 
 
-# IOS prompt:  RouterName>  /  RouterName#  /  RouterName(config-if)#
-# Excludes 'consoles>' (CML proxy prompt) via negative lookbehind on 'consoles'
-_PROMPT_RE = re.compile(r"(?<!consoles)[\w\-]+(\([^\)]+\))?[#>]\s*$", re.MULTILINE)
+# IOS / Linux prompt:  RouterName>  /  RouterName#  /  RouterName(config-if)#  /  PC1:~$  /  cisco@Server1:~$
+# Excludes 'consoles>' (CML proxy prompt) via negative lookahead on consoles>
+_PROMPT_RE = re.compile(
+    r"^(?!.*consoles>).*(?:(?:[\w\-]+@)?[\w\-]+(?::[^\r\n#>$]*)?|[\w\-]+(?:\([^\)]+\))?)[#>$]\s*$",
+    re.MULTILINE,
+)
 # Same prompt token anchored at the START of a line. A help body line always
 # begins with a keyword/description, never with the device prompt — so any line
 # starting 'R1#...'/'R1>...'/'R1(config-if)#...' is a command echo or prompt
 # re-display the device interleaves around the help, and must be dropped
 # (Bug B: stray intermediate 'R1#' line after the '?' query).
-_PROMPT_START_RE = re.compile(r"^(?!consoles>)[\w\-]+(\([^\)]+\))?[#>]")
+_PROMPT_START_RE = re.compile(
+    r"^(?!consoles>)(?:(?:[\w\-]+@)?[\w\-]+(?::[^\r\n#>$]*)?|[\w\-]+(?:\([^\)]+\))?)[#>$]"
+)
 _PRIV_PROMPT_RE = re.compile(r"[\w\-]+#\s*$", re.MULTILINE)
 _RETURN_RE = re.compile(r"RETURN|return|Press.*get started", re.IGNORECASE)
 # Console EXEC-level logout banner. `exit` / `logout` from user or privileged
@@ -507,6 +512,27 @@ class CMLConsoleDevice:
             # credentials. Park the session (channel stays open) and signal the
             # caller to collect them — NEVER auto-send a blank password.
             if _USERNAME_PROMPT_RE.search(clean) or _PASSWORD_RE.search(clean):
+                # For CML Linux desktop / server instances, attempt default 'cisco'/'cisco' login
+                if any(x in self.path.lower() for x in ("/pc", "/server", "/desktop", "pc1", "pc2", "server1", "server2")):
+                    log.info("Attempting default credentials for CML Linux node %s", self.path)
+                    try:
+                        if _USERNAME_PROMPT_RE.search(clean):
+                            self._audit_send("cisco\r\n", source="auth.default_linux_user")
+                            buf_p = self._read_until(timeout=4)
+                            clean_p = _ANSI_STRIP.sub("", buf_p)
+                        else:
+                            clean_p = clean
+                        if _PASSWORD_RE.search(clean_p):
+                            self._audit_send("cisco\r\n", source="auth.default_linux_pass", secret=True)
+                            buf_post = self._read_until(timeout=4)
+                            clean_post = _ANSI_STRIP.sub("", buf_post)
+                            if _PROMPT_RE.search(clean_post):
+                                last_line = clean_post.rstrip().split("\n")[-1].strip()
+                                self._current_prompt = last_line
+                                break
+                    except Exception as e:
+                        log.debug("Auto-login failed: %s", e)
+
                 stage = (
                     "password"
                     if _PASSWORD_RE.search(clean) and not _USERNAME_PROMPT_RE.search(clean)
@@ -549,8 +575,11 @@ class CMLConsoleDevice:
         # command output pages via execute_paged()/pager_send_key() where the
         # engineer presses Space (next page) / Tab (break) / q (quit). We still
         # set 'terminal width 0' to stop line-wrapping so output parses cleanly.
-        self._send("terminal width 0")
-        self._read_until(timeout=5)
+        # Skip for Linux shells to avoid "terminal: command not found" errors.
+        is_linux = last_line.endswith("$") or ":" in last_line or any(x in self.path.lower() for x in ("/pc", "/server", "/desktop"))
+        if not is_linux:
+            self._send("terminal width 0")
+            self._read_until(timeout=5)
 
         self._awaiting_auth = False
         self._auth_stage_timer = None
