@@ -117,6 +117,10 @@ class AttachmentService:
         content_bytes: bytes,
     ) -> AttachmentInfo:
         """Validate, store, and return extracted attachment info."""
+        # Defense in depth: the id becomes a directory name, so it must be a
+        # plain token (server-minted ids are ``conv-<hex>``) — never a path.
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,64}", conversation_id or ""):
+            raise ValueError("Invalid conversation id.")
         is_valid, err = self.validate_file(filename, content_bytes)
         if not is_valid:
             raise ValueError(err)

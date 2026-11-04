@@ -127,6 +127,14 @@ _CRITICAL_BLOCKED_PREFIXES = (
     "delete nvram",
 )
 
+#: Linux-destructive applets (bare or busybox-wrapped): rebooting, wiping,
+#: or repartitioning a lab endpoint is never a Copilot operation, even with
+#: approval. Matched exactly (see _is_critical_blocked).
+_LINUX_CRITICAL_APPLETS = frozenset({
+    "reboot", "halt", "poweroff", "shutdown",
+    "rm", "rmdir", "mkfs", "dd", "fdisk", "--install",
+})
+
 #: IOS read-only diagnostic heads (auto-executed without approval).
 _IOS_READ_ONLY_HEADS = frozenset({"show", "ping", "traceroute", "trace"})
 
@@ -167,8 +175,11 @@ _IOS_PIPE_MODIFIERS = frozenset({
 #: Linux pipe targets allowed after ``|`` (read-only filters).
 _LINUX_PIPE_TARGETS = frozenset({"grep", "head", "tail", "wc", "sort"})
 
-#: Shell metacharacters that indicate command chaining/injection: always reject.
-_CHAINING_RE = re.compile(r"[;&`]|&&|\|\||\$\(|\$\{")
+#: Shell metacharacters that indicate command chaining/injection/redirection:
+#: always reject. ``>``/``<`` would allow a "read-only" diagnostic to
+#: overwrite device files; a second ``|`` would smuggle an unvalidated command
+#: past the single-filter allowlist below.
+_CHAINING_RE = re.compile(r"[;&`<>]|&&|\|\||\$\(|\$\{")
 
 _IPV4_RE = re.compile(r"\b\d{1,3}(?:\.\d{1,3}){3}\b")
 
@@ -195,10 +206,15 @@ def _is_critical_blocked(cmd: str) -> bool:
     low = " ".join(cmd.strip().lower().split())
     if low.startswith("do "):
         low = low[3:].strip()
-    return any(
+    if any(
         low == prefix or low.startswith(prefix + " ") or low.startswith(prefix + "|")
         for prefix in _CRITICAL_BLOCKED_PREFIXES
-    )
+    ):
+        return True
+    parts = low.replace("|", " ").split()
+    first = parts[0] if parts else ""
+    applet = parts[1] if first == "busybox" and len(parts) > 1 else first
+    return applet in _LINUX_CRITICAL_APPLETS
 
 
 def _linux_is_read_only(tokens: List[str]) -> bool:
@@ -273,7 +289,14 @@ def validate_command_for_platform(command: str, platform: str) -> CommandVerdict
                               message=f"Command exceeds {MAX_COMMAND_CHARS} characters.")
     if _CHAINING_RE.search(raw):
         return CommandVerdict(ok=False, error_code="multi_command",
-                              message="Command chaining (; && || $() ``) is not allowed.")
+                              message="Command chaining, redirection, and "
+                                      "substitution (; && || > < $() ``) are not allowed.")
+    if raw.count("|") > 1:
+        # Only the first pipe segment's head is allowlisted below; a second
+        # pipe would execute an unvalidated command on the device shell.
+        return CommandVerdict(ok=False, error_code="multi_command",
+                              message="Only a single read-only output filter "
+                                      "(| ...) is allowed.")
     if _is_critical_blocked(raw):
         return CommandVerdict(
             ok=False, error_code="blocked_destructive",

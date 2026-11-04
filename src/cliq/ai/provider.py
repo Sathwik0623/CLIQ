@@ -51,7 +51,7 @@ class ModelInfo:
     description: str
     context_window: int = 128000
     supports_streaming: bool = True
-    supports_tools: bool = True
+    supports_tools: bool = False  # secure default: no model offers tools
     is_default: bool = False
     available: bool = True
 
