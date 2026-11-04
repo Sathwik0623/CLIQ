@@ -18,8 +18,12 @@ import {
   uploadAttachment,
   streamChatMessage,
 } from '../../lib/copilotApi';
+import type { ConfigPlanView, ExecResultPayload, ToolRun, ToolStreamEvent } from '../../lib/copilotApi';
+import { confirmExecTicket, fetchConfigPlan, runExecDirect, toolRunKey } from '../../lib/copilotApi';
 import CopilotMessageList from './CopilotMessageList';
 import CopilotComposer from './CopilotComposer';
+import CopilotExecCard from './CopilotExecCard';
+import ConfigPlanCard from './ConfigPlanCard';
 import AddContextModal from './AddContextModal';
 import {
   SparklesIcon,
@@ -41,6 +45,7 @@ interface CopilotPanelProps {
   focusedDeviceId?: string | null;
   deviceMetrics?: Record<string, { status: string; mode: string }>;
   token?: string;
+  labId?: string;
   onInsertCommand?: (deviceId: string, command: string) => void;
   onExplainCommand?: (deviceId: string, command: string) => void;
   onRefitTerminals?: () => void;
@@ -55,6 +60,7 @@ export default function CopilotPanel({
   focusedDeviceId,
   deviceMetrics,
   token,
+  labId,
   onInsertCommand,
   onExplainCommand,
   onRefitTerminals,
@@ -85,6 +91,11 @@ export default function CopilotPanel({
   const [streamingMsgId, setStreamingMsgId] = useState<string | null>(null);
   const [isContextModalOpen, setIsContextModalOpen] = useState(false);
 
+  // Autonomous device executions (M1.2) for the latest turn
+  const [toolRuns, setToolRuns] = useState<ToolRun[]>([]);
+  const [approvingKey, setApprovingKey] = useState<string | null>(null);
+  const [configPlans, setConfigPlans] = useState<ConfigPlanView[]>([]);
+
   // Rename modal / inline edit state
   const [editingConvId, setEditingConvId] = useState<string | null>(null);
   const [editingTitle, setEditingTitle] = useState('');
@@ -112,15 +123,8 @@ export default function CopilotPanel({
         if (!mounted) return;
         setConversations(convs);
 
-        if (convs.length > 0) {
-          setActiveConvId(convs[0].id);
-        } else {
-          // Auto-create initial conversation if none exist
-          const newConv = await createConversation('CLIQ Copilot Session', undefined, undefined, token);
-          if (!mounted) return;
-          setConversations([newConv]);
-          setActiveConvId(newConv.id);
-        }
+        // Fresh-chat default: never auto-open history. The operator picks a
+        // conversation from History explicitly; the first send lazily creates.
       } catch (err) {
         console.error('Failed to initialize Copilot:', err);
       }
@@ -136,6 +140,19 @@ export default function CopilotPanel({
   }, [isOpen, token]);
 
   // 2. Load conversation messages when active conversation changes
+  const prevLabRef = useRef<string | undefined>(undefined);
+  useEffect(() => {
+    if (prevLabRef.current !== undefined && prevLabRef.current !== labId) {
+      setActiveConvId(null);
+      setMessages([]);
+      setToolRuns([]);
+      setConfigPlans([]);
+      setAttachments([]);
+      setContextChips([]);
+    }
+    prevLabRef.current = labId;
+  }, [labId]);
+
   const loadConversation = useCallback(async (convId: string) => {
     if (skipNextLoadRef.current === convId) {
       skipNextLoadRef.current = null;
@@ -147,7 +164,40 @@ export default function CopilotPanel({
         skipNextLoadRef.current = null;
         return;
       }
-      setMessages(conv.messages || []);
+      const msgs = conv.messages || [];
+      setMessages(msgs);
+      const restoredRuns: ToolRun[] = [];
+      const rehydratePlanIds: string[] = [];
+      for (const m of msgs) {
+        const md = (m.metadata || {}) as Record<string, any>;
+        for (const res of (md.tool_results as ExecResultPayload[] | undefined) || []) {
+          const rkey = toolRunKey(res.device_id, res.command);
+          if (restoredRuns.some((r) => r.key === rkey)) continue;
+          restoredRuns.push({
+            key: rkey,
+            lab_id: res.lab_id,
+            device_id: res.device_id,
+            device_label: res.device_label,
+            command: res.command,
+            status: res.success ? 'success' : res.approval_required ? 'approval_required' : 'error',
+            result: res,
+            ticket: res.ticket,
+          });
+        }
+        const pid = md.config_plan_id as string | null | undefined;
+        if (pid && !rehydratePlanIds.includes(pid)) rehydratePlanIds.push(pid);
+      }
+      setToolRuns(restoredRuns);
+      const restoredPlans: ConfigPlanView[] = [];
+      for (const pid of rehydratePlanIds.slice(0, 3)) {
+        try {
+          restoredPlans.push(await fetchConfigPlan(pid, token));
+        } catch {
+          // Plan store is in-memory server-side; references survive restarts,
+          // live plan bodies may not. Messages remain the record.
+        }
+      }
+      setConfigPlans(restoredPlans);
       if (conv.model) {
         setSelectedModel((prev) => {
           const validModels = ['muse-spark-1.3', 'muse-wonder-1.0', 'muse-spark-1.2'];
@@ -163,6 +213,8 @@ export default function CopilotPanel({
   }, [token]);
 
   useEffect(() => {
+    setToolRuns([]);
+    setConfigPlans([]);
     if (activeConvId) {
       loadConversation(activeConvId);
     } else {
@@ -215,12 +267,10 @@ export default function CopilotPanel({
       setConversations(remaining);
 
       if (activeConvId === convId) {
-        if (remaining.length > 0) {
-          setActiveConvId(remaining[0].id);
-        } else {
-          setActiveConvId(null);
-          setMessages([]);
-        }
+        setActiveConvId(null);
+        setMessages([]);
+        setToolRuns([]);
+        setConfigPlans([]);
       }
     } catch (err) {
       console.error('Failed to delete conversation:', err);
@@ -245,7 +295,7 @@ export default function CopilotPanel({
             reader.onload = async () => {
               try {
                 const base64Content = (reader.result as string).split(',')[1] || '';
-                const att = await uploadAttachment(activeConvId, file.name, base64Content, true);
+                const att = await uploadAttachment(activeConvId, file.name, base64Content, true, token);
                 setAttachments((prev) => [...prev, att]);
                 resolve();
               } catch (err) {
@@ -257,7 +307,7 @@ export default function CopilotPanel({
         } else {
           // Read as text
           const text = await file.text();
-          const att = await uploadAttachment(activeConvId, file.name, text, false);
+          const att = await uploadAttachment(activeConvId, file.name, text, false, token);
           setAttachments((prev) => [...prev, att]);
         }
       }
@@ -291,6 +341,120 @@ export default function CopilotPanel({
   const handleRemoveAttachment = (attId: string) => {
     setAttachments((prev) => prev.filter((a) => a.id !== attId));
   };
+
+  // 7b. Autonomous execution stream events (M1.2)
+  const handleToolEvent = useCallback((event: ToolStreamEvent) => {
+    if (event.type === 'tool_call') {
+      const key = toolRunKey(event.device_id, event.command);
+      setToolRuns((prev) => {
+        const next = prev.filter((r) => r.key !== key);
+        return [
+          ...next,
+          {
+            key,
+            lab_id: event.lab_id,
+            device_id: event.device_id,
+            device_label: event.device_label,
+            command: event.command,
+            status: 'running',
+          },
+        ];
+      });
+    } else if (event.type === 'tool_result') {
+      const res = event.result;
+      const key = toolRunKey(res.device_id, res.command);
+      setToolRuns((prev) =>
+        prev.map((r) =>
+          r.key === key
+            ? {
+                ...r,
+                status: res.success ? 'success' : res.approval_required ? 'approval_required' : 'error',
+                result: res,
+                ticket: res.ticket,
+              }
+            : r
+        )
+      );
+    } else if (event.type === 'approval_required') {
+      const key = toolRunKey(event.device_id, event.command);
+      setToolRuns((prev) =>
+        prev.map((r) => (r.key === key ? { ...r, status: 'approval_required', ticket: event.ticket } : r))
+      );
+    } else if (event.type === 'tool_rejected') {
+      const key = toolRunKey(event.device_id, event.command);
+      setToolRuns((prev) => {
+        if (prev.some((r) => r.key === key)) return prev;
+        return [
+          ...prev,
+          {
+            key,
+            lab_id: event.lab_id,
+            device_id: event.device_id,
+            device_label: event.device_label,
+            command: event.command,
+            status: 'invalid',
+            note: event.message,
+          },
+        ];
+      });
+    } else if (event.type === 'config_plan') {
+      const plan = event.plan;
+      setConfigPlans((prev) => {
+        const next = prev.filter((p) => p.plan_id !== plan.plan_id);
+        return [plan, ...next].slice(0, 3);
+      });
+    }
+  }, []);
+
+  const handleApproveExec = useCallback(
+    async (run: ToolRun) => {
+      if (!run.ticket) return;
+      setApprovingKey(run.key);
+      setToolRuns((prev) =>
+        prev.map((r) => (r.key === run.key ? { ...r, status: 'approved_running', note: undefined } : r))
+      );
+      try {
+        const confirmation = await confirmExecTicket(run.ticket.ticket_id, token);
+        const res = await runExecDirect(
+          {
+            lab_id: run.lab_id,
+            device_id: run.device_id,
+            command: run.command,
+            approval_token: confirmation.approval_token,
+          },
+          token
+        );
+        setToolRuns((prev) =>
+          prev.map((r) =>
+            r.key === run.key
+              ? { ...r, status: res.success ? 'success' : 'error', result: res, ticket: undefined }
+              : r
+          )
+        );
+      } catch (err: any) {
+        setToolRuns((prev) =>
+          prev.map((r) =>
+            r.key === run.key
+              ? { ...r, status: 'approval_required', note: `Approval failed: ${err?.message || 'unknown error'}` }
+              : r
+          )
+        );
+      } finally {
+        setApprovingKey(null);
+      }
+    },
+    [token]
+  );
+
+  const handleRejectExec = useCallback((run: ToolRun) => {
+    setToolRuns((prev) =>
+      prev.map((r) =>
+        r.key === run.key
+          ? { ...r, status: 'rejected', note: 'Rejected by engineer. The command was not executed.' }
+          : r
+      )
+    );
+  }, []);
 
   // 8. Send Message with SSE Streaming
   const handleSendMessage = async (userPrompt?: string) => {
@@ -373,6 +537,7 @@ export default function CopilotPanel({
     setAttachments([]);
     setIsStreaming(true);
     setStreamingMsgId(assistantMsgId);
+    setToolRuns([]);
 
     const abortController = new AbortController();
     abortControllerRef.current = abortController;
@@ -385,6 +550,7 @@ export default function CopilotPanel({
         contextChips: currentChips,
         attachments: currentAtts,
         signal: abortController.signal,
+        onToolEvent: handleToolEvent,
         onChunk: (delta: string) => {
           setMessages((prev) =>
             prev.map((m) => {
@@ -825,6 +991,43 @@ export default function CopilotPanel({
             onInsertCommand={onInsertCommand}
             onExplainCommand={handleExplainCommand}
           />
+
+          {/* Configuration plans (M1.4) */}
+          {configPlans.length > 0 && (
+            <div className="border-t border-neutral-800/60 bg-neutral-950/60 px-3 py-2 space-y-2 max-h-72 overflow-y-auto shrink-0">
+              <div className="text-[9.5px] font-semibold uppercase tracking-wider text-neutral-500">
+                Configuration plans
+              </div>
+              {configPlans.map((plan) => (
+                <ConfigPlanCard
+                  key={`${plan.plan_id}:v${plan.version}`}
+                  plan={plan}
+                  token={token}
+                  onPlanUpdated={(updated) =>
+                    setConfigPlans((prev) => prev.map((p) => (p.plan_id === updated.plan_id ? updated : p)))
+                  }
+                />
+              ))}
+            </div>
+          )}
+
+          {/* Autonomous device executions (M1.2) */}
+          {toolRuns.length > 0 && (
+            <div className="border-t border-neutral-800/60 bg-neutral-950/60 px-3 py-2 space-y-2 max-h-56 overflow-y-auto shrink-0">
+              <div className="text-[9.5px] font-semibold uppercase tracking-wider text-neutral-500">
+                Device executions
+              </div>
+              {toolRuns.map((run) => (
+                <CopilotExecCard
+                  key={run.key}
+                  run={run}
+                  approving={approvingKey === run.key}
+                  onApprove={handleApproveExec}
+                  onReject={handleRejectExec}
+                />
+              ))}
+            </div>
+          )}
 
           {/* Input Composer */}
           <CopilotComposer

@@ -401,6 +401,12 @@ class CMLAuthManager:
         """
         Return full topology data ready for Sharath's UI renderer.
 
+        Reads the SDK-verified single-shot ``GET /labs/{id}/topology``
+        snapshot first (virl2_client ``Lab._sync_topology`` / ``import_lab``
+        contract: links reference *interfaces*, node endpoints are derived
+        via the interface -> node mapping), falling back to legacy per-item
+        enumeration when the snapshot is unavailable.
+
         Response schema:
           {
             "nodes": [
@@ -409,16 +415,39 @@ class CMLAuthManager:
               ...
             ],
             "links": [
-              { "id": "<uuid>", "label": "iosv-0-Gi0/0<->iosv-1-Gi0/0",
-                "node_a": "<uuid>", "node_b": "<uuid>" },
+              { "id": "<uuid>", "label": "Gi0/0<->Gi0/1",
+                "node_a": "<uuid>", "node_b": "<uuid>",
+                "node_a_label": "iosv-0", "node_b_label": "iosv-1",
+                "node_a_intf": "Gi0/0", "node_b_intf": "Gi0/1",
+                "interface_a_id": "<uuid>", "interface_b_id": "<uuid>" },
+              ...
+            ],
+            "interfaces": [
+              { "id": "<uuid>", "node": "<uuid>", "node_label": "iosv-0",
+                "label": "Gi0/0", "type": "physical" },
               ...
             ]
           }
 
-        Note: x, y are CML canvas coordinates (integers).
+        Note: x, y are CML canvas coordinates (integers). Never raises for
+        malformed payloads: unparseable entries are skipped and every node
+        and link keeps its "id" key.
         """
         self._ensure_auth()
 
+        # ── Single-shot snapshot (preferred, SDK-verified) ──────────
+        try:
+            snapshot = self._get(f"/labs/{lab_id}/topology").json()
+            parsed = self._parse_topology_snapshot(snapshot)
+            if parsed is not None:
+                return parsed
+        except Exception:
+            pass
+
+        return self._get_topology_per_item(lab_id)
+
+    def _get_topology_per_item(self, lab_id: str) -> dict:
+        """Legacy per-item enumeration fallback (nodes/links listed singly)."""
         # ── Nodes with positions ─────────────────────────────────────
         nodes_out = []
         try:
@@ -554,7 +583,124 @@ class CMLAuthManager:
         except Exception:
             pass
 
-        return {"nodes": nodes_out, "links": links_out}
+        return {
+            "nodes": nodes_out,
+            "links": links_out,
+            "interfaces": [
+                {"id": iid, "node": "", "node_label": "",
+                 "label": lbl, "type": ""}
+                for iid, lbl in interfaces_map.items()
+            ],
+        }
+
+    @staticmethod
+    def _parse_topology_snapshot(payload) -> Optional[dict]:
+        """Parse ``GET /labs/{id}/topology`` per the SDK contract.
+
+        Returns ``{"nodes", "links", "interfaces"}`` or None when the
+        payload is not a snapshot (caller falls back to per-item
+        enumeration). Never raises on malformed content.
+        """
+        if not isinstance(payload, dict):
+            return None
+        raw_nodes = payload.get("nodes")
+        if not isinstance(raw_nodes, list):
+            return None
+        nodes_out = []
+        for nd in raw_nodes:
+            if not isinstance(nd, dict):
+                continue
+            nid = str(nd.get("id") or "")
+            nodes_out.append({
+                "id": nid,
+                "label": str(nd.get("label") or nid or "?"),
+                "type": str(nd.get("node_definition") or "unknown"),
+                "state": str(nd.get("state") or "unknown"),
+                "x": nd.get("x", 0),
+                "y": nd.get("y", 0),
+            })
+        node_map = {n["id"]: n.get("label", "") for n in nodes_out if n["id"]}
+
+        def _iface_entry(item, default_node):
+            data = item.get("data") if isinstance(item.get("data"), dict) else item
+            iid = str(item.get("id") or "")
+            if not iid:
+                return None
+            return (iid, {
+                "id": iid,
+                "node": str(item.get("node") or default_node or ""),
+                "node_label": "",
+                "label": str(data.get("label") or ""),
+                "type": str(data.get("type") or ""),
+            })
+
+        ifaces: dict[str, dict] = {}
+        raw_ifaces = payload.get("interfaces")
+        if isinstance(raw_ifaces, list):
+            for item in raw_ifaces:
+                if isinstance(item, dict):
+                    parsed = _iface_entry(item, "")
+                    if parsed:
+                        ifaces[parsed[0]] = parsed[1]
+        for nd in raw_nodes:
+            if not isinstance(nd, dict):
+                continue
+            nested = nd.get("interfaces")
+            if not isinstance(nested, list):
+                continue
+            for item in nested:
+                if not isinstance(item, dict):
+                    continue
+                parsed = _iface_entry(item, str(nd.get("id") or ""))
+                if parsed and parsed[0] not in ifaces:
+                    ifaces[parsed[0]] = parsed[1]
+        for entry in ifaces.values():
+            entry["node_label"] = node_map.get(entry["node"], "")
+
+        def _is_uuid(val) -> bool:
+            v = (val or "").strip()
+            return bool(re.match(
+                r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-"
+                r"[0-9a-f]{4}-[0-9a-f]{12}$", v, re.I))
+
+        links_out = []
+        raw_links = payload.get("links")
+        if isinstance(raw_links, list):
+            for lk in raw_links:
+                if not isinstance(lk, dict):
+                    continue
+                a_id = str(lk.get("interface_a") or "")
+                b_id = str(lk.get("interface_b") or "")
+                a = ifaces.get(a_id, {})
+                b = ifaces.get(b_id, {})
+                intf_a = a.get("label", "")
+                intf_b = b.get("label", "")
+                raw_label = str(lk.get("label") or "")
+                if intf_a and intf_b:
+                    link_label = f"{intf_a} <-> {intf_b}"
+                elif raw_label and not _is_uuid(raw_label):
+                    link_label = raw_label
+                elif intf_a:
+                    link_label = intf_a
+                elif intf_b:
+                    link_label = intf_b
+                else:
+                    link_label = ""
+                links_out.append({
+                    "id": str(lk.get("id") or ""),
+                    "label": link_label,
+                    "node_a": a.get("node", ""),
+                    "node_b": b.get("node", ""),
+                    "node_a_label": a.get("node_label", ""),
+                    "node_b_label": b.get("node_label", ""),
+                    "node_a_intf": intf_a,
+                    "node_b_intf": intf_b,
+                    "interface_a_id": a_id,
+                    "interface_b_id": b_id,
+                    "raw": lk,
+                })
+        return {"nodes": nodes_out, "links": links_out,
+                "interfaces": list(ifaces.values())}
 
     # ─────────────────────────────────────────────────────────────
     # Internal helpers

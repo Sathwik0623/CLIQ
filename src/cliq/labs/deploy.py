@@ -355,6 +355,7 @@ def confirm_deployment(
     *,
     idempotency_key: Optional[str] = None,
     lab_title: Optional[str] = None,
+    allow_offline: bool = False,
     client_factory: ClientFactory,
     session_host: str,
     session_username: str,
@@ -384,6 +385,16 @@ def confirm_deployment(
             raise DeploymentError("approval ticket already consumed")
 
     title = validate_lab_title(lab_title or ticket.lab_title)
+    if not ticket.live and not allow_offline:
+        raise DeploymentError(
+            "deployment requires live-controller validation; this ticket was "
+            "prepared offline. Re-validate against the live controller first."
+        )
+    if not ticket.live and allow_offline:
+        log.warning(
+            "OFFLINE DEPLOYMENT OVERRIDE ticket=%s title=%s",
+            ticket.ticket_id, title,
+        )
     job = DeployJob(
         job_id=_new_id("job"),
         ticket_id=ticket.ticket_id,

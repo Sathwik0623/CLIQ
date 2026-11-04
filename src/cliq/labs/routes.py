@@ -116,6 +116,7 @@ class PlanRequest(BaseModel):
     prompt: str = Field(min_length=3, max_length=4000)
     provider: str = Field(default="meta", min_length=1, max_length=64)
     model: Optional[str] = Field(default=None, max_length=128)
+    live: bool = False
 
 
 class ValidateRequest(BaseModel):
@@ -137,12 +138,23 @@ async def plan_endpoint(
     payload: PlanRequest,
     token: str = Depends(_require_session_dep),
 ) -> dict:
-    _ = token
+    snapshot = None
+    live_meta: dict[str, Any] = {"live": False}
+    if payload.live:
+        session = _owned_cml_session(token)
+        get_json = _cml_get_json(session.auth)
+        try:
+            catalog = discover_controller_catalog(get_json)
+        except DiscoveryError as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+        snapshot = catalog.to_snapshot()
+        live_meta = {"live": True, **catalog.summary()}
     try:
         result = await plan_lab(
             prompt=payload.prompt,
             provider_id=payload.provider,
             model=payload.model,
+            snapshot=snapshot,
         )
     except PlannerError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
@@ -152,6 +164,8 @@ async def plan_endpoint(
         "provider": result.provider,
         "model": result.model,
         "mock": result.mock,
+        "interfaces_verified": result.interfaces_verified,
+        **live_meta,
     }
 
 
@@ -269,6 +283,7 @@ class ConfirmRequest(BaseModel):
     ticket_id: str = Field(min_length=1, max_length=64)
     idempotency_key: Optional[str] = Field(default=None, max_length=128)
     lab_title: Optional[str] = Field(default=None, max_length=128)
+    allow_offline: bool = False
 
 
 @router.post("/deploy/prepare")
@@ -318,6 +333,7 @@ def deploy_confirm_endpoint(
             token, payload.ticket_id,
             idempotency_key=payload.idempotency_key,
             lab_title=payload.lab_title,
+            allow_offline=payload.allow_offline,
             client_factory=_deploy.build_client_library,
             session_host=session.host,
             session_username=session.username,

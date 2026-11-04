@@ -44,6 +44,16 @@ export interface StoredMessage {
     target_device_id?: string;
     context_chips?: ContextChip[];
     attachment_ids?: string[];
+    executed_commands?: Array<{ device_id: string; device_label: string; command: string; success: boolean; error_code: string }>;
+    rejected_commands?: Array<Record<string, unknown>>;
+    tool_results?: Array<{
+      success: boolean; device_id: string; device_label: string; lab_id: string;
+      platform: string; command: string; send_command: string; stdout: string;
+      stderr: string; exit_status: number; error: string; error_code: string;
+      latency_ms: number; truncated: boolean; approval_required: boolean;
+      ticket?: { ticket_id: string; lab_id: string; device_id: string; device_label: string; platform: string; command: string; created_at: number; expires_at: number };
+    }>;
+    config_plan_id?: string | null;
     model?: string;
     provider?: string;
     token_usage?: {

@@ -24,7 +24,7 @@ from typing import Optional
 from pydantic import ValidationError
 
 from cliq.ai.provider import ChatMessage, ChatRole
-from cliq.labs.models import LabBlueprint
+from cliq.labs.models import ControllerSnapshot, LabBlueprint
 
 log = logging.getLogger("cliq.labs.planner")
 
@@ -57,6 +57,58 @@ class PlanResult:
     provider: str = ""
     model: str = ""
     mock: bool = False
+    interfaces_verified: bool = False
+
+
+#: Link interface labels stay illustrative until per-node-definition interface
+#: capabilities can be discovered from the controller (unsupported CML
+#: capability inventory as of this implementation).
+INTERFACES_UNVERIFIED_WARNING = (
+    "interfaces_unverified: link interface labels are illustrative. "
+    "Per-node-definition interface capabilities cannot be discovered from the "
+    "controller, so mappings cannot be verified until deploy time, when the "
+    "controller assigns actual interface labels."
+)
+
+
+def grounding_text(snapshot: Optional[ControllerSnapshot]) -> str:
+    """Render live controller facts as planner prompt grounding."""
+    if snapshot is None:
+        return ""
+    parts: list[str] = []
+    if snapshot.node_definitions:
+        parts.append("Available node_definitions on this controller: "
+                     + ", ".join(snapshot.node_definitions[:60]) + ".")
+    if snapshot.image_definitions:
+        parts.append("Available image_definitions on this controller: "
+                     + ", ".join(snapshot.image_definitions[:60]) + ".")
+    if not parts:
+        return ""
+    return ("\n\nLIVE CONTROLLER FACTS (authoritative — only these values exist; "
+            "never invent other definitions or images):\n" + "\n".join(parts))
+
+
+def reject_unlisted_definitions(blueprint: LabBlueprint,
+                                snapshot: Optional[ControllerSnapshot]) -> None:
+    """Fail closed when the blueprint uses definitions the controller lacks."""
+    if snapshot is None:
+        return
+    if snapshot.node_definitions is not None:
+        allowed = {d.strip().lower() for d in snapshot.node_definitions if d.strip()}
+        for node in blueprint.nodes:
+            if node.node_definition.strip().lower() not in allowed:
+                raise PlannerError(
+                    f"node_definition '{node.node_definition}' is not available "
+                    "on this controller")
+    if snapshot.image_definitions is not None:
+        allowed_images = {d.strip().lower() for d in snapshot.image_definitions
+                          if d.strip()}
+        for node in blueprint.nodes:
+            if (node.image_definition
+                    and node.image_definition.strip().lower() not in allowed_images):
+                raise PlannerError(
+                    f"image_definition '{node.image_definition}' is not available "
+                    "on this controller")
 
 
 def _mock_enabled() -> bool:
@@ -187,21 +239,41 @@ async def plan_lab(
     prompt: str,
     provider_id: str = "meta",
     model: Optional[str] = None,
+    snapshot: Optional[ControllerSnapshot] = None,
 ) -> PlanResult:
-    """Plan a lab blueprint from natural language via the AI provider abstraction."""
+    """Plan a lab blueprint from natural language via the AI provider abstraction.
+
+    When a live controller ``snapshot`` is supplied, the LLM prompt is grounded
+    in the actual definitions/images and blueprints using unlisted values are
+    rejected. Interface labels always remain illustrative (see
+    :data:`INTERFACES_UNVERIFIED_WARNING`).
+    """
     text = (prompt or "").strip()
     if len(text) < 3:
         raise PlannerError("prompt must be at least 3 characters")
     if len(text) > 4000:
         raise PlannerError("prompt must be at most 4000 characters")
 
+    grounded_text = text + grounding_text(snapshot)
+
+    def _finish(blueprint: LabBlueprint, warnings: list[str],
+                used_model: str, mock: bool) -> PlanResult:
+        reject_unlisted_definitions(blueprint, snapshot)
+        if blueprint.links:
+            warnings.append(INTERFACES_UNVERIFIED_WARNING)
+        return PlanResult(
+            blueprint=blueprint, warnings=warnings,
+            provider=provider_id, model=used_model, mock=mock,
+            interfaces_verified=False,
+        )
+
     warnings: list[str] = []
     if _mock_enabled():
         blueprint = parse_lab_prompt_fallback(text)
-        return PlanResult(
-            blueprint=blueprint,
-            warnings=["mock_mode: deterministic offline plan (no LLM call)"],
-            provider=provider_id, model=model or "mock", mock=True,
+        return _finish(
+            blueprint,
+            ["mock_mode: deterministic offline plan (no LLM call)"],
+            model or "mock", True,
         )
 
     from cliq.ai.registry import get_provider
@@ -216,22 +288,18 @@ async def plan_lab(
         warnings.append(
             f"provider '{provider_id}' is not configured; used deterministic offline plan"
         )
-        return PlanResult(
-            blueprint=blueprint, warnings=warnings,
-            provider=provider_id, model=model or provider.get_default_model(), mock=True,
+        return _finish(
+            blueprint, warnings, model or provider.get_default_model(), True,
         )
 
     chosen_model = model or provider.get_default_model()
     messages = [
         ChatMessage(role=ChatRole.DEVELOPER, content=LAB_PLANNER_SYSTEM_PROMPT),
-        ChatMessage(role=ChatRole.USER, content=text),
+        ChatMessage(role=ChatRole.USER, content=grounded_text),
     ]
     try:
         response = await provider.chat(messages=messages, model=chosen_model, temperature=0.2)
     except Exception as exc:
         raise PlannerError(f"AI provider error: {exc}") from exc
     blueprint = parse_blueprint_json(response.content)
-    return PlanResult(
-        blueprint=blueprint, warnings=warnings,
-        provider=provider_id, model=chosen_model, mock=False,
-    )
+    return _finish(blueprint, warnings, chosen_model, False)

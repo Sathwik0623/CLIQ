@@ -1923,6 +1923,7 @@ export default function MainTerminalUi(props: MainTerminalUiProps) {
           focusedDeviceId={focusedDeviceId}
           deviceMetrics={metrics}
           token={props.token}
+          labId={props.selectedLabId}
           onInsertCommand={(deviceId, command) => {
             if (deviceId && deviceId !== props.activeDeviceId) {
               props.onSetActiveDevice(deviceId);

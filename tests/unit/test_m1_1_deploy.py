@@ -135,6 +135,22 @@ class _FakeCMLAuth:
         return self.topology
 
 
+# Live-controller catalog fixture: confirmation requires live-validated
+# tickets, so success-path tests prepare with live=True against these routes.
+_LIVE_ROUTES = {
+    "/node_definitions": [{"id": "iosv"}, {"id": "iosvl2"}],
+    "/image_definitions": [],
+    "/system_stats": {},
+    "/system_health": {},
+    "/system_information": {"version": "2.9.0"},
+}
+
+
+def _live_auth(**kwargs):
+    kwargs.setdefault("routes", dict(_LIVE_ROUTES))
+    return _FakeCMLAuth(**kwargs)
+
+
 @pytest.fixture
 def deploy_session():
     from cliq.web.server import SESSIONS, AuthSession
@@ -228,10 +244,10 @@ def test_prepare_unit_rejects_invalid():
 # -----------------------------------------------------------------------------
 
 def test_confirm_runs_exact_sdk_sequence(deploy_session, monkeypatch):
-    token, headers = deploy_session(auth=_FakeCMLAuth())
+    token, headers = deploy_session(auth=_live_auth())
     client = _client()
     prep = client.post("/api/labs/deploy/prepare",
-                       json={"blueprint": _valid_blueprint_dict()},
+                       json={"blueprint": _valid_blueprint_dict(), "live": True},
                        headers=headers).json()
 
     calls: list = []
@@ -305,10 +321,10 @@ def test_confirm_sdk_missing_is_501(deploy_session, monkeypatch):
 # -----------------------------------------------------------------------------
 
 def test_confirm_idempotent_same_key_single_lab(deploy_session, monkeypatch):
-    _, headers = deploy_session(auth=_FakeCMLAuth())
+    _, headers = deploy_session(auth=_live_auth())
     client = _client()
     prep = client.post("/api/labs/deploy/prepare",
-                       json={"blueprint": _valid_blueprint_dict()},
+                       json={"blueprint": _valid_blueprint_dict(), "live": True},
                        headers=headers).json()
 
     calls: list = []
@@ -332,10 +348,10 @@ def test_confirm_idempotent_same_key_single_lab(deploy_session, monkeypatch):
 
 
 def test_confirm_consumed_ticket_replays_job(deploy_session, monkeypatch):
-    _, headers = deploy_session(auth=_FakeCMLAuth())
+    _, headers = deploy_session(auth=_live_auth())
     client = _client()
     prep = client.post("/api/labs/deploy/prepare",
-                       json={"blueprint": _valid_blueprint_dict()},
+                       json={"blueprint": _valid_blueprint_dict(), "live": True},
                        headers=headers).json()
     monkeypatch.setattr("cliq.labs.deploy.build_client_library",
                         lambda h, u, p: _FakeClient())
@@ -348,10 +364,10 @@ def test_confirm_consumed_ticket_replays_job(deploy_session, monkeypatch):
 
 
 def test_deploy_refuses_duplicate_title(deploy_session, monkeypatch):
-    _, headers = deploy_session(auth=_FakeCMLAuth())
+    _, headers = deploy_session(auth=_live_auth())
     client = _client()
     prep = client.post("/api/labs/deploy/prepare",
-                       json={"blueprint": _valid_blueprint_dict()},
+                       json={"blueprint": _valid_blueprint_dict(), "live": True},
                        headers=headers).json()
 
     calls: list = []
@@ -372,10 +388,10 @@ def test_deploy_refuses_duplicate_title(deploy_session, monkeypatch):
 # -----------------------------------------------------------------------------
 
 def test_deploy_halts_on_node_failure_no_retry(deploy_session, monkeypatch):
-    _, headers = deploy_session(auth=_FakeCMLAuth())
+    _, headers = deploy_session(auth=_live_auth())
     client = _client()
     prep = client.post("/api/labs/deploy/prepare",
-                       json={"blueprint": _valid_blueprint_dict()},
+                       json={"blueprint": _valid_blueprint_dict(), "live": True},
                        headers=headers).json()
 
     calls: list = []
@@ -423,12 +439,12 @@ def test_ticket_expiry_is_410(deploy_session, monkeypatch):
 # -----------------------------------------------------------------------------
 
 def test_job_status_ownership_404(deploy_session, monkeypatch):
-    token_a, headers_a = deploy_session(auth=_FakeCMLAuth())
+    token_a, headers_a = deploy_session(auth=_live_auth())
     _, headers_b = deploy_session(auth=_FakeCMLAuth())
     assert token_a
     client = _client()
     prep = client.post("/api/labs/deploy/prepare",
-                       json={"blueprint": _valid_blueprint_dict()},
+                       json={"blueprint": _valid_blueprint_dict(), "live": True},
                        headers=headers_a).json()
     monkeypatch.setattr("cliq.labs.deploy.build_client_library",
                         lambda h, u, p: _FakeClient())
@@ -447,7 +463,7 @@ def test_job_status_ownership_404(deploy_session, monkeypatch):
 
 
 def test_deploy_topology_reactflow_shape(deploy_session, monkeypatch):
-    _, headers = deploy_session(auth=_FakeCMLAuth(topology={
+    _, headers = deploy_session(auth=_live_auth(topology={
         "nodes": [{"id": "n1", "label": "R1", "type": "iosv",
                    "state": "DEFINED", "x": 10, "y": 20}],
         "links": [{"id": "l1", "label": "E0/0 <-> E0/0",
@@ -456,7 +472,7 @@ def test_deploy_topology_reactflow_shape(deploy_session, monkeypatch):
     }))
     client = _client()
     prep = client.post("/api/labs/deploy/prepare",
-                       json={"blueprint": _valid_blueprint_dict()},
+                       json={"blueprint": _valid_blueprint_dict(), "live": True},
                        headers=headers).json()
     monkeypatch.setattr("cliq.labs.deploy.build_client_library",
                         lambda h, u, p: _FakeClient())
@@ -474,10 +490,10 @@ def test_deploy_topology_reactflow_shape(deploy_session, monkeypatch):
 
 
 def test_deploy_topology_failed_job_is_409(deploy_session, monkeypatch):
-    _, headers = deploy_session(auth=_FakeCMLAuth())
+    _, headers = deploy_session(auth=_live_auth())
     client = _client()
     prep = client.post("/api/labs/deploy/prepare",
-                       json={"blueprint": _valid_blueprint_dict()},
+                       json={"blueprint": _valid_blueprint_dict(), "live": True},
                        headers=headers).json()
     fake_client = _FakeClient(existing_titles=["Demo lab"])
     monkeypatch.setattr("cliq.labs.deploy.build_client_library",
@@ -621,10 +637,10 @@ def test_prepare_rejects_empty_and_long_titles(deploy_session):
 
 
 def test_confirm_override_is_normalized(deploy_session, monkeypatch):
-    _, headers = deploy_session(auth=_FakeCMLAuth())
+    _, headers = deploy_session(auth=_live_auth())
     client = _client()
     prep = client.post("/api/labs/deploy/prepare",
-                       json={"blueprint": _valid_blueprint_dict()},
+                       json={"blueprint": _valid_blueprint_dict(), "live": True},
                        headers=headers).json()
     calls: list = []
     fake_client = _FakeClient(calls=calls)

@@ -115,12 +115,38 @@ class NetworkContextService:
 
         return None
 
+    def _node_type_for(self, session_token: Optional[str], device_id: str) -> str:
+        """Inventory node type for a device id or label ("" when unknown)."""
+        server = self._get_server_module()
+        norm = (device_id or "").strip().lower()
+        if not norm:
+            return ""
+        token_maps = []
+        if session_token and session_token in server.DEVICES_BY_TOKEN:
+            token_maps.append(server.DEVICES_BY_TOKEN[session_token])
+        for tok, devs in server.DEVICES_BY_TOKEN.items():
+            if tok != session_token:
+                token_maps.append(devs)
+        for devs in token_maps:
+            for d_id, meta in (devs or {}).items():
+                if (str(d_id).lower() == norm
+                        or str((meta or {}).get("label") or "").lower() == norm):
+                    return str((meta or {}).get("type") or "")
+        return ""
+
     def _execute_read_only_command(self, session_token: Optional[str], device_id: str, command: str) -> str:
         """Safely execute a read-only verification command on the device runtime."""
         # Validate that the command is strictly read-only
         cmd_clean = command.strip().lower()
         if not cmd_clean.startswith("show "):
-            raise ValueError(f"Only read-only 'show' commands are permitted by the AI context service: {command}")
+            from cliq.ai import device_exec as _device_exec
+            platform = _device_exec.classify_platform(
+                self._node_type_for(session_token, device_id))
+            verdict = _device_exec.validate_command_for_platform(command, platform)
+            if not verdict.ok or not verdict.read_only:
+                raise ValueError(
+                    "Only read-only 'show' commands (or platform-validated "
+                    f"read-only diagnostics) are permitted by the AI context service: {command}")
 
         runtime = self._resolve_runtime(session_token, device_id)
         if not runtime or not runtime.device:
@@ -143,8 +169,13 @@ class NetworkContextService:
             return f"[Error querying device: {str(ex)[:80]}]"
 
     def get_interfaces(self, session_token: Optional[str] = None, device_id: str = "") -> str:
-        """Retrieve sanitized interface status."""
-        return self._execute_read_only_command(session_token, device_id, "show ip interface brief")
+        """Retrieve sanitized interface status (platform-aware command)."""
+        from cliq.ai import device_exec as _device_exec
+        platform = _device_exec.classify_platform(
+            self._node_type_for(session_token, device_id))
+        command = ("ifconfig -a" if platform == _device_exec.PLATFORM_LINUX
+                   else "show ip interface brief")
+        return self._execute_read_only_command(session_token, device_id, command)
 
     def get_running_config(self, session_token: Optional[str] = None, device_id: str = "") -> str:
         """Retrieve sanitized running configuration with secrets redacted."""

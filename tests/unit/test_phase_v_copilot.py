@@ -287,11 +287,18 @@ async def test_copilot_orchestrator():
 # 6. FastAPI Copilot Router Endpoints
 # -----------------------------------------------------------------------------
 
-def test_fastapi_copilot_routes():
+def test_fastapi_copilot_routes(monkeypatch):
     from fastapi.testclient import TestClient
-    from cliq.web.server import app
+    from types import SimpleNamespace
+    from cliq.web.server import SESSIONS, app
 
+    monkeypatch.setitem(SESSIONS, "tok-T", SimpleNamespace(host="cml", auth=object()))
     client = TestClient(app)
+    Q = "?token=tok-T"
+
+    # 0. Unauthenticated conversation access is rejected.
+    assert client.get("/api/copilot/conversations").status_code == 401
+    assert client.post("/api/copilot/conversations", json={"title": "x"}).status_code == 401
 
     # 1. GET /api/copilot/providers
     res = client.get("/api/copilot/providers")
@@ -304,7 +311,7 @@ def test_fastapi_copilot_routes():
 
     # 2. POST /api/copilot/conversations
     res_create = client.post(
-        "/api/copilot/conversations",
+        "/api/copilot/conversations" + Q,
         json={"title": "Test REST Conversation", "model": "Llama-3.3-70B-Instruct", "provider": "meta"},
     )
     assert res_create.status_code == 200
@@ -313,13 +320,13 @@ def test_fastapi_copilot_routes():
     assert conv_data["title"] == "Test REST Conversation"
 
     # 3. GET /api/copilot/conversations/{id}
-    res_get = client.get(f"/api/copilot/conversations/{conv_id}")
+    res_get = client.get(f"/api/copilot/conversations/{conv_id}" + Q)
     assert res_get.status_code == 200
     assert res_get.json()["id"] == conv_id
 
     # 4. PATCH /api/copilot/conversations/{id}
     res_rename = client.patch(
-        f"/api/copilot/conversations/{conv_id}",
+        f"/api/copilot/conversations/{conv_id}" + Q,
         json={"title": "Renamed Title"},
     )
     assert res_rename.status_code == 200
@@ -327,7 +334,7 @@ def test_fastapi_copilot_routes():
 
     # 5. POST /api/copilot/upload
     res_upload = client.post(
-        "/api/copilot/upload",
+        "/api/copilot/upload" + Q,
         json={
             "conversation_id": conv_id,
             "filename": "ospf_debug.log",
@@ -343,7 +350,7 @@ def test_fastapi_copilot_routes():
     # 6. POST /api/copilot/conversations/{id}/messages (SSE stream in mock mode)
     with patch.dict(os.environ, {"CLIQ_AI_MOCK": "1"}):
         res_stream = client.post(
-            f"/api/copilot/conversations/{conv_id}/messages",
+            f"/api/copilot/conversations/{conv_id}/messages" + Q,
             json={
                 "content": "Explain OSPF hello dead intervals",
                 "model": "Llama-3.3-70B-Instruct",
@@ -357,12 +364,12 @@ def test_fastapi_copilot_routes():
         assert "[DONE]" in body
 
     # 7. DELETE /api/copilot/conversations/{id}
-    res_del = client.delete(f"/api/copilot/conversations/{conv_id}")
+    res_del = client.delete(f"/api/copilot/conversations/{conv_id}" + Q)
     assert res_del.status_code == 200
     assert res_del.json()["success"] is True
 
     # 8. Confirm deleted
-    res_get_deleted = client.get(f"/api/copilot/conversations/{conv_id}")
+    res_get_deleted = client.get(f"/api/copilot/conversations/{conv_id}" + Q)
     assert res_get_deleted.status_code == 404
 
 

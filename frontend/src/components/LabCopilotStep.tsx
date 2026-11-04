@@ -123,7 +123,7 @@ export default function LabCopilotStep(props: LabCopilotStepProps) {
     setBusy(true);
     setError('');
     try {
-      const plan = await postLabPlan(props.token, prompt.trim());
+      const plan = await postLabPlan(props.token, prompt.trim(), liveCheck);
       const [prev, verdict] = await Promise.all([
         postLabPreview(props.token, plan.blueprint),
         postLabValidate(props.token, plan.blueprint, liveCheck),

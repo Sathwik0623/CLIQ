@@ -108,8 +108,8 @@ async function getJson<T>(token: string, path: string): Promise<T> {
   return body as T;
 }
 
-export async function postLabPlan(token: string, prompt: string): Promise<PlanResponse> {
-  return postJson<PlanResponse>(token, '/api/labs/plan', { prompt });
+export async function postLabPlan(token: string, prompt: string, live?: boolean): Promise<PlanResponse> {
+  return postJson<PlanResponse>(token, '/api/labs/plan', { prompt, ...(live !== undefined ? { live } : {}) });
 }
 
 export async function postLabPreview(token: string, blueprint: LabBlueprint): Promise<PreviewResponse> {

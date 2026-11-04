@@ -74,6 +74,7 @@ def estimate_resources(blueprint: LabBlueprint) -> ResourceEstimate:
 def validate_blueprint(
     blueprint: LabBlueprint,
     snapshot: Optional[ControllerSnapshot] = None,
+    interfaces_verified: bool = False,
 ) -> ValidationResult:
     """Validate a blueprint without any CML writes or network calls."""
     errors: list[ValidationIssue] = []
@@ -189,6 +190,17 @@ def validate_blueprint(
                         f"plan uses {estimate.total_ram_mb}/{available_mb} MB available RAM (>=80%)"
                     ),
                 ))
+
+    if blueprint.links and not interfaces_verified:
+        warnings.append(ValidationIssue(
+            code="interfaces_unverified",
+            message=(
+                "link interface labels are illustrative and unverified: "
+                "per-node-definition interface capabilities cannot be "
+                "discovered from the controller. Actual labels are assigned "
+                "by the controller at deploy time."
+            ),
+        ))
 
     return ValidationResult(
         valid=not errors,

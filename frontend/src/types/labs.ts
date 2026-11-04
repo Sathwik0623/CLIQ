@@ -54,6 +54,8 @@ export type PlanResponse = {
   provider: string;
   model: string;
   mock: boolean;
+  interfaces_verified?: boolean;
+  live?: boolean;
 };
 
 export type PreviewResponse = {
